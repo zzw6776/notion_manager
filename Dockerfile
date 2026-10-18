@@ -11,8 +11,9 @@ COPY web/ ./
 RUN npm run build
 
 # Stage 2: Build Backend Binary
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend-builder
 WORKDIR /app
+ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git ca-certificates
 
