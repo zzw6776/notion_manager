@@ -90,7 +90,27 @@ export OPENAI_BASE_URL=http://localhost:8081/v1
 export OPENAI_API_KEY=<your-api-key>
 ```
 
-Or download a pre-built binary from [Releases](https://github.com/SleepingBag945/notion_manager/releases) — no Go toolchain required.
+Or download a pre-built binary from [Releases](https://github.com/zzw6776/notion_manager/releases) — no Go toolchain required.
+
+### Run with Docker
+
+Use pre-built multi-arch images (supporting linux/amd64 and linux/arm64):
+
+```bash
+docker run -d \
+  --name notion-manager \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  -v ${PWD}/accounts:/app/accounts \
+  -v ${PWD}/config.yaml:/app/config.yaml \
+  ghcr.io/zzw6776/notion_manager:latest
+```
+
+Or run with Docker Compose:
+
+```bash
+docker compose up -d
+```
 
 ---
 

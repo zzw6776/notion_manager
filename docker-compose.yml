@@ -1,0 +1,13 @@
+services:
+  notion-manager:
+    image: ghcr.io/zzw6776/notion_manager:${NOTION_MANAGER_IMAGE_TAG:-latest}
+    container_name: notion-manager
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./accounts:/app/accounts
+      - ./config.yaml:/app/config.yaml
+    environment:
+      - PORT=8081
+      - ACCOUNTS_DIR=/app/accounts

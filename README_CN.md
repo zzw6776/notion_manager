@@ -74,7 +74,27 @@ export OPENAI_BASE_URL=http://localhost:8081/v1
 export OPENAI_API_KEY=<your-api-key>
 ```
 
-也可以直接从 [Releases](https://github.com/SleepingBag945/notion_manager/releases) 下载预编译二进制，无需 Go 工具链。
+也可以直接从 [Releases](https://github.com/zzw6776/notion_manager/releases) 下载预编译二进制，无需 Go 工具链。
+
+### 使用 Docker 启动
+
+使用预构建多架构镜像（支持 linux/amd64 与 linux/arm64）：
+
+```bash
+docker run -d \
+  --name notion-manager \
+  --restart unless-stopped \
+  -p 8081:8081 \
+  -v ${PWD}/accounts:/app/accounts \
+  -v ${PWD}/config.yaml:/app/config.yaml \
+  ghcr.io/zzw6776/notion_manager:latest
+```
+
+或使用 Docker Compose 一键启动：
+
+```bash
+docker compose up -d
+```
 
 ---
 
