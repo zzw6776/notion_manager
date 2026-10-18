@@ -11,3 +11,16 @@ services:
     environment:
       - PORT=8081
       - ACCOUNTS_DIR=/app/accounts
+
+  # 自动监控最新镜像并热更新容器
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_API_VERSION=1.44
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=300
+    command: notion-manager
