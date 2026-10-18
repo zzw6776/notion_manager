@@ -27,12 +27,13 @@
     "quota_unified": "Space / User 配额一致",
     "included_in_plan": "方案内包含",
     "included_in_plan_desc": "适用于 Notion AI 功能。使用积分的产品（例如自定义代理和 Workers）不计入此配额。",
-    "rolling_quota": "滚动配额 (6小时)",
-    "monthly_quota": "月度配额",
+    "rolling_quota": "滚动 (6h)",
+    "monthly_quota": "月度",
     "resets_in": "{{time}}后重置",
     "resets_on": "重置于 {{date}}",
     "used_percent": "已使用 {{percent}}%",
-    "rolling_remaining": "滚动可用 {{percent}}%"
+    "points": "点",
+    "rolling_remaining": "滚动可用 {{percent}}% (剩余 {{points}} 点)"
   },
   "stats": {
     "total_accounts": "总账号",

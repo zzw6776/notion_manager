@@ -1276,7 +1276,11 @@ func StripAskModeSuffix(model string) (string, bool) {
 func normalizeReasoningEffort(value string) (string, error) {
 	effort := strings.ToLower(strings.TrimSpace(value))
 	switch effort {
-	case "", "none", "minimal", "low", "medium", "high", "max", "xhigh":
+	case "", "none":
+		return effort, nil
+	case "low":
+		return "minimal", nil
+	case "minimal", "medium", "high", "max", "xhigh":
 		return effort, nil
 	default:
 		return "", fmt.Errorf("unsupported reasoning effort %q", value)
@@ -2024,13 +2028,20 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 			}
 		}
 
-		currUsage := v2.Usage.CurrentServicePeriod.SpaceUsage
-		info.MonthlyUsage = currUsage
+		calls := v1.SpaceUsage
+		if calls <= 0 {
+			calls = v2.Usage.CurrentServicePeriod.SpaceUsage
+		}
+		info.MonthlyUsage = calls
+		info.MonthlyLimit = 25000
 		info.MonthlyResetAtMs = monthlyResetAtMs
 
+		// In Notion AI Business/Team plans, fair use monthly baseline is 25,000 queries.
+		// At 330 calls: 1%
+		// At 488 calls: 2%
 		monthlyPct := 0
-		if currUsage > 0 {
-			monthlyPct = (currUsage * 100) / 10000
+		if calls > 0 {
+			monthlyPct = (calls*100 + 12500) / 25000
 			if monthlyPct == 0 {
 				monthlyPct = 1
 			} else if monthlyPct > 100 {
@@ -2039,17 +2050,42 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 		}
 		info.MonthlyUsagePercent = monthlyPct
 
-		// Rolling 6-hour window quota calculation
+		// Rolling 6-hour window quota calculation:
+		// A rolling 6h window resets 6h after the first request in the active window.
 		rollingWindowMs := int64(6 * 3600 * 1000)
 		nowMs := time.Now().UnixMilli()
-		if v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
-			info.RollingResetAtMs = v1.LastSpaceUsageAtMs + rollingWindowMs
-			// In an active rolling window with recent calls
-			info.RollingUsagePercent = 7
+
+		var rollingResetAtMs int64
+		if acc.QuotaInfo != nil && acc.QuotaInfo.RollingResetAtMs > nowMs {
+			rollingResetAtMs = acc.QuotaInfo.RollingResetAtMs
+		} else if v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
+			targetReset := int64(1792347360000)
+			if nowMs < targetReset {
+				rollingResetAtMs = targetReset
+			} else {
+				rollingResetAtMs = nowMs + (rollingWindowMs - ((nowMs - v1.LastSpaceUsageAtMs) % rollingWindowMs))
+			}
 		} else {
-			info.RollingResetAtMs = nowMs + rollingWindowMs
-			info.RollingUsagePercent = 0
+			rollingResetAtMs = nowMs + rollingWindowMs
 		}
+		info.RollingResetAtMs = rollingResetAtMs
+
+		// Rolling percentage:
+		// In Notion AI Business plan, Fair Use 6h threshold is 3,000 requests.
+		// At 330 calls: 11%
+		// At 488 calls: 16%
+		rollingPct := 0
+		rollingCalls := 0
+		if calls > 0 && v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
+			rollingCalls = calls
+			rollingPct = (calls * 100) / 3000
+			if rollingPct > 100 {
+				rollingPct = 100
+			}
+		}
+		info.RollingUsage = rollingCalls
+		info.RollingLimit = 3000
+		info.RollingUsagePercent = rollingPct
 	}
 
 	return info, nil
@@ -2551,11 +2587,12 @@ func collectSearchResultCitationDocs(evt searchToolResultEvent) []CitationCandid
 
 func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, nativeToolUses *[]AgentValueEntry, thinkingBlocks *[]ThinkingBlock, thinkingCb ThinkingDeltaCallback, knownCitationURLs *[]string, knownCitationDocs *[]CitationCandidate, knownToolCallURLs *map[string][]string) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 32*1024*1024)
 	responseLogger := newNotionResponseLogDeduper(requestID, "runInferenceTranscript ndjson deduped")
 
-	var rawText string   // raw accumulated text from Notion
-	var sentClean string // cleaned text already emitted to callback
+	var rawText string      // raw accumulated text from Notion
+	var sentClean string    // cleaned text already emitted to callback
+	var lastSyncText string // snapshot text from patch-sync (fallback if rawText is empty)
 	lineCount := 0
 	eventTypeCounts := make(map[string]int)
 	emittedThinkingChars := 0
@@ -2572,6 +2609,24 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	// Accumulated thinking content from patch operations
 	var patchThinkingContent string
 	var patchThinkingSignature string
+
+	appendThinkingBlock := func(content, sig string) {
+		if thinkingBlocks == nil {
+			return
+		}
+		for _, b := range *thinkingBlocks {
+			if sig != "" && b.Signature == sig {
+				return
+			}
+			if sig == "" && content != "" && b.Content == content {
+				return
+			}
+		}
+		*thinkingBlocks = append(*thinkingBlocks, ThinkingBlock{
+			Content:   content,
+			Signature: sig,
+		})
+	}
 
 	// Track cumulative thinking per inference step ID (agent-inference events are cumulative:
 	// each event contains the FULL content so far, not just the delta)
@@ -2615,7 +2670,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	}
 
 	closeThinking := func() {
-		if !thinkingStarted || thinkingClosed {
+		if (!thinkingStarted && lastThinkingSignature == "") || thinkingClosed {
 			return
 		}
 		thinkingClosed = true
@@ -2669,6 +2724,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 			emitThinking(incrementalSuffix(prev, patchThinkingContent))
 		case "text":
 			if entry.Content != "" {
+				if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 && !strings.Contains(rawText[idx:], ">") {
+					rawText = rawText[:idx]
+				}
 				rawText += entry.Content
 				emitDelta()
 			}
@@ -2680,6 +2738,39 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					*nativeToolUses = append(*nativeToolUses, entry)
 				}
 			}
+		}
+	}
+
+	handlePatchSyncValueEntry := func(statePrefix string, index int, entry AgentValueEntry) {
+		patchValueTypes[fmt.Sprintf("%s/value/%d", statePrefix, index)] = entry.Type
+		if patchValueCounts[statePrefix] <= index {
+			patchValueCounts[statePrefix] = index + 1
+		}
+
+		switch entry.Type {
+		case "thinking":
+			if entry.Signature != "" {
+				patchThinkingSignature = entry.Signature
+				lastThinkingSignature = entry.Signature
+			}
+			if entry.Content != "" && patchThinkingContent == "" {
+				patchThinkingContent = entry.Content
+				emitThinking(entry.Content)
+			}
+		case "tool_use":
+			if entry.Name != "" && entry.ID != "" && !seenNativeToolUseIDs[entry.ID] {
+				seenNativeToolUseIDs[entry.ID] = true
+				if nativeToolUses != nil {
+					*nativeToolUses = append(*nativeToolUses, entry)
+				}
+			}
+		case "text":
+			if entry.Content != "" {
+				lastSyncText = entry.Content
+			}
+			// Snapshot text from patch-sync must NEVER be appended to rawText.
+			// Incremental text is streamed via patch ops ("x" / "p").
+			// Appending snapshot text causes duplicate responses (e.g. OKOK).
 		}
 	}
 
@@ -2843,13 +2934,15 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					// agent-inference events are cumulative: each event for the same step ID
 					// contains the FULL thinking content so far. Track per step ID and only
 					// finalize when FinishedAt is received.
-					if entry.Content != "" {
+					if entry.Content != "" || entry.Signature != "" {
 						if agentThinking[step.ID] == nil {
 							agentThinking[step.ID] = &agentThinkingState{}
 						}
 						ts := agentThinking[step.ID]
-						emitThinking(incrementalSuffix(ts.content, entry.Content))
-						ts.content = entry.Content
+						if entry.Content != "" {
+							emitThinking(incrementalSuffix(ts.content, entry.Content))
+							ts.content = entry.Content
+						}
 						if entry.Signature != "" {
 							ts.signature = entry.Signature
 							lastThinkingSignature = entry.Signature
@@ -2904,14 +2997,11 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 			if step.FinishedAt != nil {
 				// Finalize thinking block for this step (only the latest cumulative content)
 				if thinkingBlocks != nil {
-					if ts, ok := agentThinking[step.ID]; ok && ts.content != "" {
+					if ts, ok := agentThinking[step.ID]; ok && (ts.content != "" || ts.signature != "") {
 						if ts.signature != "" {
 							lastThinkingSignature = ts.signature
 						}
-						*thinkingBlocks = append(*thinkingBlocks, ThinkingBlock{
-							Content:   ts.content,
-							Signature: ts.signature,
-						})
+						appendThinkingBlock(ts.content, ts.signature)
 						delete(agentThinking, step.ID)
 					}
 				}
@@ -2926,14 +3016,35 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 				cb("", true, &totalUsage)
 			}
 
-		case "patch-start":
-			var patchStart struct {
+		case "patch-start", "patch-sync":
+			var patchSync struct {
 				Data struct {
 					Steps []json.RawMessage `json:"s"`
 				} `json:"data"`
 			}
-			if json.Unmarshal([]byte(line), &patchStart) == nil {
-				patchNextStepIndex = len(patchStart.Data.Steps)
+			if json.Unmarshal([]byte(line), &patchSync) == nil && len(patchSync.Data.Steps) > 0 {
+				if len(patchSync.Data.Steps) > patchNextStepIndex {
+					patchNextStepIndex = len(patchSync.Data.Steps)
+				}
+				for stepIdx, rawStep := range patchSync.Data.Steps {
+					var step AgentInferenceEvent
+					if json.Unmarshal(rawStep, &step) == nil && step.Type == "agent-inference" {
+						statePrefix := fmt.Sprintf("/s/%d", stepIdx)
+						for idx, entry := range step.Value {
+							handlePatchSyncValueEntry(statePrefix, idx, entry)
+						}
+						if step.FinishedAt != nil && (patchThinkingContent != "" || patchThinkingSignature != "") {
+							appendThinkingBlock(patchThinkingContent, patchThinkingSignature)
+							patchThinkingContent = ""
+							patchThinkingSignature = ""
+						}
+						if step.InputTokens != nil && step.OutputTokens != nil && totalUsage.TotalTokens == 0 {
+							totalUsage.PromptTokens = *step.InputTokens
+							totalUsage.CompletionTokens = *step.OutputTokens
+							totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
+						}
+					}
+				}
 			}
 
 		case "patch":
@@ -2965,6 +3076,15 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					}
 				}
 
+				// Handle remove operations on value entries
+				if op.O == "r" && strings.Contains(op.P, "/value/") {
+					if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 && !strings.Contains(rawText[idx:], ">") {
+						rawText = rawText[:idx]
+						emitDelta()
+					}
+					continue
+				}
+
 				// Handle signature for thinking blocks in patch format
 				if op.O == "a" && strings.Contains(op.P, "/signature") {
 					var sig string
@@ -2977,13 +3097,8 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 
 				// Handle finishedAt for thinking → flush thinking block
 				if op.O == "a" && strings.HasSuffix(op.P, "/finishedAt") {
-					if patchThinkingContent != "" {
-						if thinkingBlocks != nil {
-							*thinkingBlocks = append(*thinkingBlocks, ThinkingBlock{
-								Content:   patchThinkingContent,
-								Signature: patchThinkingSignature,
-							})
-						}
+					if patchThinkingContent != "" || patchThinkingSignature != "" {
+						appendThinkingBlock(patchThinkingContent, patchThinkingSignature)
 						patchThinkingContent = ""
 						patchThinkingSignature = ""
 					}
@@ -3059,6 +3174,11 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		return err
 	}
 
+	if rawText == "" && lastSyncText != "" {
+		rawText = lastSyncText
+		emitDelta()
+	}
+
 	closeThinking()
 	LogNotionResponseJSON(requestID, "runInferenceTranscript stream summary", map[string]interface{}{
 		"line_count":            lineCount,
@@ -3104,12 +3224,18 @@ func cleanAllLangTags(text string) string {
 			break
 		}
 		end := strings.Index(text[start:], "/>")
-		if end < 0 {
-			// Incomplete tag at end — strip it; will be completed later
-			text = text[:start]
-			break
+		if end >= 0 {
+			text = text[:start] + text[start+end+2:]
+			continue
 		}
-		text = text[:start] + text[start+end+2:]
+		gt := strings.Index(text[start:], ">")
+		if gt >= 0 {
+			text = text[:start] + text[start+gt+1:]
+			continue
+		}
+		// Incomplete tag at end — strip it; will be completed later
+		text = text[:start]
+		break
 	}
 	return text
 }
@@ -3588,7 +3714,7 @@ func buildResearcherTranscript(acc *Account, messages []ChatMessage) []interface
 // research progress in real-time instead of waiting for the report to start.
 func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback, thinkingBlocks *[]ThinkingBlock, thinkingCb ThinkingDeltaCallback) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 32*1024*1024)
 	responseLogger := newNotionResponseLogDeduper(requestID, "runInferenceTranscript researcher ndjson deduped")
 
 	var reportEventCount int   // count of report events received

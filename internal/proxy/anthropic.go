@@ -228,6 +228,10 @@ func streamWebSearch(w http.ResponseWriter, flusher http.Flusher, acc *Account, 
 			if sig == "" {
 				sig = generateFakeSignature()
 			}
+			content := tb.Content
+			if content == "" && sig != "" {
+				content = "Thinking..."
+			}
 			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
 				"type":          "content_block_start",
 				"index":         *blockIndex,
@@ -236,7 +240,7 @@ func streamWebSearch(w http.ResponseWriter, flusher http.Flusher, acc *Account, 
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
 				"index": *blockIndex,
-				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": tb.Content},
+				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": content},
 			})
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
@@ -1817,6 +1821,14 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	if hasThinking && len(thinkingBlocks) > 0 {
 		log.Printf("[thinking] emitting %d thinking block(s)", len(thinkingBlocks))
 		for _, tb := range thinkingBlocks {
+			sig := tb.Signature
+			if sig == "" {
+				sig = generateFakeSignature()
+			}
+			content := tb.Content
+			if content == "" && sig != "" {
+				content = "Thinking..."
+			}
 			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
 				"type":          "content_block_start",
 				"index":         blockIndex,
@@ -1825,12 +1837,8 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
 				"index": blockIndex,
-				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": tb.Content},
+				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": content},
 			})
-			sig := tb.Signature
-			if sig == "" {
-				sig = generateFakeSignature()
-			}
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
 				"index": blockIndex,
@@ -1841,7 +1849,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			})
 			loggedContentBlocks = append(loggedContentBlocks, AnthropicContentBlock{
 				Type:      "thinking",
-				Thinking:  tb.Content,
+				Thinking:  content,
 				Signature: sig,
 			})
 			blockIndex++
@@ -2092,12 +2100,28 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 			if sig == "" {
 				sig = generateFakeSignature()
 			}
+			content := tb.Content
+			if content == "" && sig != "" {
+				content = "Thinking..."
+			}
 			contentBlocks = append(contentBlocks, AnthropicContentBlock{
 				Type:      "thinking",
-				Thinking:  tb.Content,
+				Thinking:  content,
 				Signature: sig,
 			})
 		}
+	} else if hasThinking && thinkingSignature != "" {
+		contentBlocks = append(contentBlocks, AnthropicContentBlock{
+			Type:      "thinking",
+			Thinking:  "Thinking...",
+			Signature: thinkingSignature,
+		})
+	} else if hasThinking {
+		contentBlocks = append(contentBlocks, AnthropicContentBlock{
+			Type:      "thinking",
+			Thinking:  "Thinking...",
+			Signature: generateFakeSignature(),
+		})
 	}
 
 	if hasTools {

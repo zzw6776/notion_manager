@@ -46,9 +46,12 @@ export interface AccountInfo {
   plan_type?: string
   rolling_usage_percent?: number
   rolling_reset_at?: number
+  rolling_usage?: number
+  rolling_limit?: number
   monthly_usage_percent?: number
   monthly_reset_at?: number
   monthly_usage?: number
+  monthly_limit?: number
 }
 
 export interface ProviderInfo {

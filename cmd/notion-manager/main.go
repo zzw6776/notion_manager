@@ -191,6 +191,7 @@ func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth
 
 	// Anthropic + OpenAI-compatible API endpoints
 	mux.HandleFunc("/v1/messages", proxy.HandleAnthropicMessages(pool))
+	mux.HandleFunc("/messages", proxy.HandleAnthropicMessages(pool))
 	mux.HandleFunc("/v1/chat/completions", proxy.HandleOpenAIChatCompletions(pool))
 	mux.HandleFunc("/v1/responses", proxy.HandleOpenAIResponses(pool))
 	mux.HandleFunc("/v1/models", proxy.HandlePublicModels(pool))

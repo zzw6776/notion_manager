@@ -436,13 +436,18 @@ function PercentQuotaBar({
   label,
   labelClass,
   percent,
+  usage,
+  limit,
   rightText,
 }: {
   label: string
   labelClass?: string
   percent: number
+  usage?: number
+  limit?: number
   rightText?: string
 }) {
+  const { t } = useTranslation()
   const safePct = Math.min(Math.max(percent || 0, 0), 100)
   const fillClass = safePct >= 100 ? 'bg-err opacity-40' : safePct >= 80 ? 'bg-warn' : 'bg-ok'
   const numColor = safePct >= 100 ? 'text-err' : safePct >= 80 ? 'text-warn' : 'text-text-primary'
@@ -450,14 +455,19 @@ function PercentQuotaBar({
   return (
     <div className="mb-2">
       <div className="flex justify-between items-baseline mb-1">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <span className={`text-[10px] ${labelClass || 'text-text-muted'}`}>{label}</span>
           <span className={`text-[11px] font-semibold tabular-nums ${numColor}`}>
             {safePct}%
+            {limit != null && limit > 0 && (
+              <span className="text-[10px] font-normal text-text-muted ml-1">
+                ({fmt(usage || 0)} / {fmt(limit)} {t('account.points', { defaultValue: '点' })})
+              </span>
+            )}
           </span>
         </div>
         {rightText && (
-          <span className="text-[10px] text-text-muted tabular-nums">
+          <span className="text-[10px] text-text-muted tabular-nums shrink-0">
             {rightText}
           </span>
         )}
@@ -626,24 +636,38 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       </div>
 
       {/* Quotas */}
-      {account.has_unlimited ? (
-        <div className="mb-2 p-2 bg-white/[0.02] border border-white/[0.04] rounded">
-          <div className="text-[10px] font-semibold text-text-secondary uppercase tracking-wider mb-1.5 flex items-center justify-between">
-            <span title={t('account.included_in_plan_desc')}>{t('account.included_in_plan')}</span>
-            <span className="text-[9px] font-normal text-ok">Fair Use</span>
+      {account.has_unlimited ? (() => {
+        const rollingLimit = account.rolling_limit || 3000
+        const rollingUsage = account.rolling_usage ?? (
+          account.rolling_usage_percent != null
+            ? Math.round(((account.rolling_usage_percent || 0) / 100) * rollingLimit)
+            : (account.space_usage ?? 0)
+        )
+        const monthlyLimit = account.monthly_limit || 25000
+        const monthlyUsage = account.monthly_usage ?? (account.space_usage ?? 0)
+        return (
+          <div className="mb-2 p-2 bg-white/[0.02] border border-white/[0.04] rounded">
+            <div className="text-[10px] font-semibold text-text-secondary uppercase tracking-wider mb-1.5 flex items-center justify-between">
+              <span title={t('account.included_in_plan_desc')}>{t('account.included_in_plan')}</span>
+              <span className="text-[9px] font-normal text-ok">Fair Use</span>
+            </div>
+            <PercentQuotaBar
+              label={t('account.rolling_quota')}
+              percent={account.rolling_usage_percent ?? 0}
+              usage={rollingUsage}
+              limit={rollingLimit}
+              rightText={formatRollingCountdown(account.rolling_reset_at, i18n.language)}
+            />
+            <PercentQuotaBar
+              label={t('account.monthly_quota')}
+              percent={account.monthly_usage_percent ?? 0}
+              usage={monthlyUsage}
+              limit={monthlyLimit}
+              rightText={formatMonthlyResetDate(account.monthly_reset_at, i18n.language)}
+            />
           </div>
-          <PercentQuotaBar
-            label={t('account.rolling_quota')}
-            percent={account.rolling_usage_percent ?? 0}
-            rightText={formatRollingCountdown(account.rolling_reset_at, i18n.language)}
-          />
-          <PercentQuotaBar
-            label={t('account.monthly_quota')}
-            percent={account.monthly_usage_percent ?? 0}
-            rightText={formatMonthlyResetDate(account.monthly_reset_at, i18n.language)}
-          />
-        </div>
-      ) : sameBasicQuota ? (
+        )
+      })() : sameBasicQuota ? (
         <QuotaBar label="Basic" usage={spaceQuota.usage} limit={spaceQuota.limit} />
       ) : (
         <>
@@ -653,9 +677,23 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       )}
       {premium && <QuotaBar label="Premium" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        {account.has_unlimited ? (
-          <span>{t('account.rolling_remaining', { percent: 100 - (account.rolling_usage_percent || 0) })}</span>
-        ) : (
+        {account.has_unlimited ? (() => {
+          const rLimit = account.rolling_limit || 3000
+          const rUsage = account.rolling_usage ?? (
+            account.rolling_usage_percent != null
+              ? Math.round(((account.rolling_usage_percent || 0) / 100) * rLimit)
+              : (account.space_usage ?? 0)
+          )
+          const remainingPts = Math.max(0, rLimit - rUsage)
+          return (
+            <span>
+              {t('account.rolling_remaining', {
+                percent: 100 - (account.rolling_usage_percent || 0),
+                points: fmt(remainingPts),
+              })}
+            </span>
+          )
+        })() : (
           <span>{t('account.basic_remaining')} {fmt(account.remaining || 0)}</span>
         )}
         {premium && <span>{t('account.premium_remaining')} {fmt(account.premium_balance || 0)}</span>}

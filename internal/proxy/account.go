@@ -1304,9 +1304,12 @@ func saveAccountFile(dir string, acc *Account) error {
 			"plan_type":               acc.QuotaInfo.PlanType,
 			"rolling_usage_percent":   acc.QuotaInfo.RollingUsagePercent,
 			"rolling_reset_at":        acc.QuotaInfo.RollingResetAtMs,
+			"rolling_usage":           acc.QuotaInfo.RollingUsage,
+			"rolling_limit":           acc.QuotaInfo.RollingLimit,
 			"monthly_usage_percent":   acc.QuotaInfo.MonthlyUsagePercent,
 			"monthly_reset_at":        acc.QuotaInfo.MonthlyResetAtMs,
 			"monthly_usage":           acc.QuotaInfo.MonthlyUsage,
+			"monthly_limit":           acc.QuotaInfo.MonthlyLimit,
 		}
 	}
 	if acc.QuotaCheckedAt != nil {
@@ -1469,9 +1472,12 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 			entry["plan_type"] = quota.Info.PlanType
 			entry["rolling_usage_percent"] = quota.Info.RollingUsagePercent
 			entry["rolling_reset_at"] = quota.Info.RollingResetAtMs
+			entry["rolling_usage"] = quota.Info.RollingUsage
+			entry["rolling_limit"] = quota.Info.RollingLimit
 			entry["monthly_usage_percent"] = quota.Info.MonthlyUsagePercent
 			entry["monthly_reset_at"] = quota.Info.MonthlyResetAtMs
 			entry["monthly_usage"] = quota.Info.MonthlyUsage
+			entry["monthly_limit"] = quota.Info.MonthlyLimit
 		}
 		if quota.CheckedAt != nil {
 			entry["checked_at"] = quota.CheckedAt.Format(time.RFC3339)
@@ -1533,9 +1539,12 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 			entry["plan_type"] = quota.Info.PlanType
 			entry["rolling_usage_percent"] = quota.Info.RollingUsagePercent
 			entry["rolling_reset_at"] = quota.Info.RollingResetAtMs
+			entry["rolling_usage"] = quota.Info.RollingUsage
+			entry["rolling_limit"] = quota.Info.RollingLimit
 			entry["monthly_usage_percent"] = quota.Info.MonthlyUsagePercent
 			entry["monthly_reset_at"] = quota.Info.MonthlyResetAtMs
 			entry["monthly_usage"] = quota.Info.MonthlyUsage
+			entry["monthly_limit"] = quota.Info.MonthlyLimit
 		}
 		if quota.CheckedAt != nil {
 			entry["checked_at"] = quota.CheckedAt.Format(time.RFC3339)
@@ -1589,15 +1598,18 @@ func loadPersistedQuotaInfo(data []byte) *QuotaInfo {
 			PlanType              string `json:"plan_type"`
 			RollingUsagePercent   int    `json:"rolling_usage_percent"`
 			RollingResetAt        int64  `json:"rolling_reset_at"`
+			RollingUsage          int    `json:"rolling_usage"`
+			RollingLimit          int    `json:"rolling_limit"`
 			MonthlyUsagePercent   int    `json:"monthly_usage_percent"`
 			MonthlyResetAt        int64  `json:"monthly_reset_at"`
 			MonthlyUsage          int    `json:"monthly_usage"`
+			MonthlyLimit          int    `json:"monthly_limit"`
 		} `json:"quota_info"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil || raw.QuotaInfo == nil {
 		return nil
 	}
-	return &QuotaInfo{
+	info := &QuotaInfo{
 		IsEligible:            raw.QuotaInfo.IsEligible,
 		SpaceUsage:            raw.QuotaInfo.SpaceUsage,
 		SpaceLimit:            raw.QuotaInfo.SpaceLimit,
@@ -1613,10 +1625,25 @@ func loadPersistedQuotaInfo(data []byte) *QuotaInfo {
 		PlanType:              raw.QuotaInfo.PlanType,
 		RollingUsagePercent:   raw.QuotaInfo.RollingUsagePercent,
 		RollingResetAtMs:      raw.QuotaInfo.RollingResetAt,
+		RollingUsage:          raw.QuotaInfo.RollingUsage,
+		RollingLimit:          raw.QuotaInfo.RollingLimit,
 		MonthlyUsagePercent:   raw.QuotaInfo.MonthlyUsagePercent,
 		MonthlyResetAtMs:      raw.QuotaInfo.MonthlyResetAt,
 		MonthlyUsage:          raw.QuotaInfo.MonthlyUsage,
+		MonthlyLimit:          raw.QuotaInfo.MonthlyLimit,
 	}
+	if info.HasUnlimitedAllowance {
+		if info.RollingLimit == 0 {
+			info.RollingLimit = 3000
+		}
+		if info.MonthlyLimit == 0 {
+			info.MonthlyLimit = 25000
+		}
+		if info.RollingUsage == 0 && info.RollingUsagePercent > 0 {
+			info.RollingUsage = info.SpaceUsage
+		}
+	}
+	return info
 }
 
 func quotaRemaining(limit, usage int) int {

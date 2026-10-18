@@ -623,3 +623,197 @@ func TestOpenAIResponsesStreamTranscoder_ThinkingBlocks(t *testing.T) {
 		t.Fatalf("missing text content in body:\n%s", body)
 	}
 }
+
+func TestOpenAIChatCompletion_ThinkingNonStream(t *testing.T) {
+	anthResp := &AnthropicResponse{
+		ID:    "msg_123",
+		Model: "opus-5.5",
+		Content: []AnthropicContentBlock{
+			{Type: "thinking", Thinking: "Deep thought process"},
+			{Type: "text", Text: "Final answer"},
+		},
+		Usage: &AnthropicUsage{
+			InputTokens:  10,
+			OutputTokens: 25,
+		},
+	}
+	resp := buildOpenAIChatCompletionResponse("resp_chat_1", 123456, "opus-5.5", anthResp)
+	if len(resp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(resp.Choices))
+	}
+	msg := resp.Choices[0].Message
+	if msg["reasoning_content"] != "Deep thought process" {
+		t.Fatalf("expected reasoning_content = %q, got %#v", "Deep thought process", msg["reasoning_content"])
+	}
+	if msg["content"] != "Final answer" {
+		t.Fatalf("expected content = %q, got %#v", "Final answer", msg["content"])
+	}
+	details, ok := resp.Usage["completion_tokens_details"].(map[string]int)
+	if !ok || details["reasoning_tokens"] <= 0 {
+		t.Fatalf("expected valid completion_tokens_details.reasoning_tokens, got %#v", resp.Usage["completion_tokens_details"])
+	}
+}
+
+func TestOpenAIResponses_ThinkingNonStream(t *testing.T) {
+	anthResp := &AnthropicResponse{
+		ID:    "msg_456",
+		Model: "opus-5.5",
+		Content: []AnthropicContentBlock{
+			{Type: "thinking", Thinking: "Pondering the query"},
+			{Type: "text", Text: "Result text"},
+		},
+		Usage: &AnthropicUsage{
+			InputTokens:  15,
+			OutputTokens: 30,
+		},
+	}
+	resp := buildOpenAIResponsesResponse("resp_resp_1", 123456, "opus-5.5", anthResp)
+	output, ok := resp["output"].([]map[string]interface{})
+	if !ok || len(output) != 2 {
+		t.Fatalf("expected 2 output items, got %#v", resp["output"])
+	}
+	reasoningItem := output[0]
+	if reasoningItem["type"] != "reasoning" {
+		t.Fatalf("expected first output item to be type reasoning, got %v", reasoningItem["type"])
+	}
+	summary, ok := reasoningItem["summary"].([]map[string]interface{})
+	if !ok || len(summary) != 1 || summary[0]["text"] != "Pondering the query" {
+		t.Fatalf("expected summary text 'Pondering the query', got %#v", reasoningItem["summary"])
+	}
+	msgItem := output[1]
+	if msgItem["type"] != "message" {
+		t.Fatalf("expected second output item to be type message, got %v", msgItem["type"])
+	}
+	usage, ok := resp["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage map, got %#v", resp["usage"])
+	}
+	outDetails, ok := usage["output_tokens_details"].(map[string]int)
+	if !ok || outDetails["reasoning_tokens"] <= 0 {
+		t.Fatalf("expected output_tokens_details.reasoning_tokens > 0, got %#v", usage["output_tokens_details"])
+	}
+}
+
+func TestOpenAIChatStreamTranscoder_ThinkingDelta(t *testing.T) {
+	rr := httptest.NewRecorder()
+	transcoder := newOpenAIChatStreamTranscoder(rr, rr, "chat_think", "claude-opus-4.6", 123, false)
+	frames := []anthropicSSEFrame{
+		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":5}}}`)},
+		{Event: "content_block_start", Data: json.RawMessage(`{"index":0,"content_block":{"type":"thinking","thinking":""}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"thinking_delta","thinking":"Thinking delta 1"}}`)},
+		{Event: "content_block_stop", Data: json.RawMessage(`{"index":0}`)},
+		{Event: "content_block_start", Data: json.RawMessage(`{"index":1,"content_block":{"type":"text","text":""}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":1,"delta":{"type":"text_delta","text":"Text 1"}}`)},
+		{Event: "content_block_stop", Data: json.RawMessage(`{"index":1}`)},
+		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`)},
+		{Event: "message_stop", Data: json.RawMessage(`{}`)},
+	}
+	for _, frame := range frames {
+		if err := transcoder.HandleFrame(frame); err != nil {
+			t.Fatalf("HandleFrame(%s) error = %v", frame.Event, err)
+		}
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"reasoning_content":"Thinking delta 1"`) {
+		t.Fatalf("expected reasoning_content delta in stream body:\n%s", body)
+	}
+	if !strings.Contains(body, `"content":"Text 1"`) {
+		t.Fatalf("expected content delta in stream body:\n%s", body)
+	}
+}
+
+func TestOpenAIReasoningEffortPopulatesAnthropicThinking(t *testing.T) {
+	chatReq := &OpenAIChatCompletionRequest{
+		Model:           "opus-5.5",
+		Messages:        []OpenAIChatMessage{{Role: "user", Content: "Hello"}},
+		ReasoningEffort: "medium",
+	}
+	anthReqChat, err := convertOpenAIChatCompletionRequest(chatReq)
+	if err != nil {
+		t.Fatalf("convertOpenAIChatCompletionRequest error = %v", err)
+	}
+	if anthReqChat.Thinking == nil {
+		t.Fatal("expected anthReqChat.Thinking to be non-nil when ReasoningEffort is set")
+	}
+
+	respReq := &OpenAIResponsesRequest{
+		Model:     "opus-5.5",
+		Input:     "Hello",
+		Reasoning: &OpenAIReasoningConfig{Effort: "high"},
+	}
+	anthReqResp, err := convertOpenAIResponsesRequest(respReq)
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest error = %v", err)
+	}
+	if anthReqResp.Thinking == nil {
+		t.Fatal("expected anthReqResp.Thinking to be non-nil when Reasoning is set")
+	}
+}
+
+func TestOpenAIResponses_ThinkingSignatureOnly(t *testing.T) {
+	// Models like Opus 5.5 in Notion return empty thinking content with a cryptographic signature
+	anthResp := &AnthropicResponse{
+		ID:    "msg_opus_sig",
+		Model: "opus-5.5",
+		Content: []AnthropicContentBlock{
+			{Type: "thinking", Thinking: "", Signature: "CAQS+fake_sig"},
+			{Type: "text", Text: "OK"},
+		},
+		Usage: &AnthropicUsage{
+			InputTokens:  89,
+			OutputTokens: 656,
+		},
+	}
+	resp := buildOpenAIResponsesResponse("resp_sig_1", 123456, "opus-5.5", anthResp)
+	output, ok := resp["output"].([]map[string]interface{})
+	if !ok || len(output) != 2 {
+		t.Fatalf("expected 2 output items, got %#v", resp["output"])
+	}
+	reasoningItem := output[0]
+	if reasoningItem["type"] != "reasoning" {
+		t.Fatalf("expected first output item to be type reasoning, got %v", reasoningItem["type"])
+	}
+	summary, ok := reasoningItem["summary"].([]map[string]interface{})
+	if !ok || len(summary) != 1 || summary[0]["text"] != "Thinking..." {
+		t.Fatalf("expected summary text 'Thinking...', got %#v", reasoningItem["summary"])
+	}
+	usage, ok := resp["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage map, got %#v", resp["usage"])
+	}
+	outDetails, ok := usage["output_tokens_details"].(map[string]int)
+	if !ok || outDetails["reasoning_tokens"] <= 0 {
+		t.Fatalf("expected output_tokens_details.reasoning_tokens > 0, got %#v", usage["output_tokens_details"])
+	}
+	if outDetails["reasoning_tokens"] < 600 {
+		t.Fatalf("expected estimated reasoning_tokens > 600, got %d", outDetails["reasoning_tokens"])
+	}
+}
+
+func TestOpenAIChatCompletion_ThinkingSignatureOnly(t *testing.T) {
+	anthResp := &AnthropicResponse{
+		ID:    "msg_opus_sig_chat",
+		Model: "opus-5.5",
+		Content: []AnthropicContentBlock{
+			{Type: "thinking", Thinking: "", Signature: "CAQS+fake_sig"},
+			{Type: "text", Text: "OK"},
+		},
+		Usage: &AnthropicUsage{
+			InputTokens:  89,
+			OutputTokens: 656,
+		},
+	}
+	resp := buildOpenAIChatCompletionResponse("resp_sig_chat", 123456, "opus-5.5", anthResp)
+	msg := resp.Choices[0].Message
+	if msg["reasoning_content"] != "Thinking..." {
+		t.Fatalf("expected reasoning_content = 'Thinking...', got %#v", msg["reasoning_content"])
+	}
+	details, ok := resp.Usage["completion_tokens_details"].(map[string]int)
+	if !ok || details["reasoning_tokens"] <= 0 {
+		t.Fatalf("expected valid completion_tokens_details.reasoning_tokens > 0, got %#v", resp.Usage["completion_tokens_details"])
+	}
+	if details["reasoning_tokens"] < 600 {
+		t.Fatalf("expected estimated reasoning_tokens > 600, got %d", details["reasoning_tokens"])
+	}
+}
+

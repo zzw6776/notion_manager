@@ -67,9 +67,12 @@ type QuotaInfo struct {
 	HasUnlimitedAllowance bool   `json:"hasUnlimitedAllowance"`        // 是否享有方案内基础无限额度 (Included in your plan)
 	RollingUsagePercent   int    `json:"rollingUsagePercent"`          // 滚动使用率 (如 7%)
 	RollingResetAtMs      int64  `json:"rollingResetAtMs,omitempty"`   // 滚动重置截止时间戳 (毫秒)
+	RollingUsage          int    `json:"rollingUsage"`                 // 滚动窗口当前用量点数
+	RollingLimit          int    `json:"rollingLimit"`                 // 滚动窗口限额点数 (默认 3000)
 	MonthlyUsagePercent   int    `json:"monthlyUsagePercent"`          // 月度使用率 (如 1%)
 	MonthlyResetAtMs      int64  `json:"monthlyResetAtMs,omitempty"`   // 月度重置时间戳 (毫秒)
 	MonthlyUsage          int    `json:"monthlyUsage,omitempty"`       // 当月实际调用量
+	MonthlyLimit          int    `json:"monthlyLimit"`                 // 当月限额点数 (默认 25000)
 }
 
 // quotaV1Response is the raw response from getAIUsageEligibility

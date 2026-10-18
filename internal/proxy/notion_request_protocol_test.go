@@ -132,6 +132,7 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 	}{
 		{name: "empty", value: "", want: ""},
 		{name: "high normalized", value: " HIGH ", want: "high"},
+		{name: "low to minimal", value: "low", want: "minimal"},
 		{name: "native maximum", value: "max", want: "max"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -524,6 +525,104 @@ func TestParseNDJSONStreamPatchV2FlushesStepThinking(t *testing.T) {
 	wantBlocks := []ThinkingBlock{{Content: "Plan more", Signature: "signature-redacted"}}
 	if !reflect.DeepEqual(thinkingBlocks, wantBlocks) {
 		t.Fatalf("thinking blocks = %#v, want %#v", thinkingBlocks, wantBlocks)
+	}
+}
+
+func TestParseNDJSONStream_ExtractsSignatureOnlyThinking(t *testing.T) {
+	// Tests Notion's Opus 5.5 behavior where thinking content is empty but signature is present
+	stream := strings.Join([]string{
+		`{"type":"agent-inference","id":"step-sig","value":[{"type":"thinking","content":"","signature":"CAQS+real_sig"}]}`,
+		`{"type":"agent-inference","id":"step-sig","value":[{"type":"text","content":"OK"}],"finishedAt":1700000000,"inputTokens":89,"outputTokens":656}`,
+	}, "\n")
+
+	var thinkingBlocks []ThinkingBlock
+	var capturedSig string
+	var thinkingDone bool
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {}, nil, &thinkingBlocks, func(delta string, done bool, signature string) {
+		if done {
+			thinkingDone = true
+			capturedSig = signature
+		}
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+
+	wantBlocks := []ThinkingBlock{{Content: "", Signature: "CAQS+real_sig"}}
+	if !reflect.DeepEqual(thinkingBlocks, wantBlocks) {
+		t.Fatalf("thinking blocks = %#v, want %#v", thinkingBlocks, wantBlocks)
+	}
+	if !thinkingDone || capturedSig != "CAQS+real_sig" {
+		t.Fatalf("expected thinking done with signature, got done=%v, sig=%q", thinkingDone, capturedSig)
+	}
+}
+
+func TestParseNDJSONStream_ExtractsPatchSyncThinking(t *testing.T) {
+	// Tests Notion's workflow mode where thinking block is synced via patch-sync
+	stream := strings.Join([]string{
+		`{"type":"patch-sync","version":1,"data":{"s":[{"id":"s0","type":"agent-instruction-state"},{"id":"s1","type":"agent-inference","value":[{"type":"thinking","content":"","signature":"CAQS+patch_sync_sig"}]}]}}`,
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/value/-","v":{"type":"text","content":"<lang primary=\"en-US"}}]}`,
+		`{"type":"patch","v":[{"o":"p","p":"/s/1/value/1/content","v":"OK"}]}`,
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/finishedAt","v":1792338587319},{"o":"a","p":"/s/1/inputTokens","v":39591},{"o":"a","p":"/s/1/outputTokens","v":656}]}`,
+	}, "\n")
+
+	var thinkingBlocks []ThinkingBlock
+	var capturedSig string
+	var thinkingDone bool
+	var textOutput strings.Builder
+	var lastUsage *UsageInfo
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if delta != "" {
+			textOutput.WriteString(delta)
+		}
+		if usage != nil {
+			lastUsage = usage
+		}
+	}, nil, &thinkingBlocks, func(delta string, done bool, signature string) {
+		if done {
+			thinkingDone = true
+			capturedSig = signature
+		}
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+
+	wantBlocks := []ThinkingBlock{{Content: "", Signature: "CAQS+patch_sync_sig"}}
+	if !reflect.DeepEqual(thinkingBlocks, wantBlocks) {
+		t.Fatalf("thinking blocks = %#v, want %#v", thinkingBlocks, wantBlocks)
+	}
+	if textOutput.String() != "OK" {
+		t.Fatalf("expected text output 'OK', got %q", textOutput.String())
+	}
+	if !thinkingDone || capturedSig != "CAQS+patch_sync_sig" {
+		t.Fatalf("expected thinking done with signature, got done=%v, sig=%q", thinkingDone, capturedSig)
+	}
+	if lastUsage == nil || lastUsage.CompletionTokens != 656 {
+		t.Fatalf("expected completion tokens 656, got %#v", lastUsage)
+	}
+}
+
+func TestParseNDJSONStream_PatchSyncSnapshotDoesNotDuplicateText(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"patch-sync","version":1,"data":{"s":[{"id":"s0","type":"agent-instruction-state"},{"id":"s1","type":"agent-inference","value":[{"type":"thinking","content":"","signature":"CAQS+patch_sync_sig"}]}]}}`,
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/value/-","v":{"type":"text","content":"<lang primary=\"en-US"}}]}`,
+		`{"type":"patch","v":[{"o":"p","p":"/s/1/value/1/content","v":"OK"}]}`,
+		`{"type":"patch-sync","version":2,"data":{"s":[{"id":"s0","type":"agent-instruction-state"},{"id":"s1","type":"agent-inference","value":[{"type":"thinking","content":"","signature":"CAQS+patch_sync_sig"},{"type":"text","content":"OK"}]}]}}`,
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/finishedAt","v":1792338587319},{"o":"a","p":"/s/1/inputTokens","v":39591},{"o":"a","p":"/s/1/outputTokens","v":656}]}`,
+	}, "\n")
+
+	var textOutput strings.Builder
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if delta != "" {
+			textOutput.WriteString(delta)
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+	if textOutput.String() != "OK" {
+		t.Fatalf("expected text output 'OK', got %q (text duplicated)", textOutput.String())
 	}
 }
 

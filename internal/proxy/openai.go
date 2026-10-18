@@ -602,6 +602,26 @@ func (t *openAIResponsesStreamTranscoder) buildFinalResponseObject() map[string]
 			item.Arguments.String(),
 		))
 	}
+	usageMap := map[string]interface{}{
+		"input_tokens":  t.inputTokens,
+		"output_tokens": t.outputTokens,
+		"total_tokens":  t.inputTokens + t.outputTokens,
+	}
+	if t.reasoningStarted {
+		reasoningTokens := (t.reasoningText.Len() + 3) / 4
+		if reasoningTokens <= 3 && t.outputTokens > 3 {
+			estText := (t.messageText.Len() + 3) / 4
+			if diff := t.outputTokens - estText; diff > 0 {
+				reasoningTokens = diff
+			}
+		}
+		if reasoningTokens <= 0 {
+			reasoningTokens = 1
+		}
+		usageMap["output_tokens_details"] = map[string]int{
+			"reasoning_tokens": reasoningTokens,
+		}
+	}
 	return map[string]interface{}{
 		"id":         t.responseID,
 		"object":     "response",
@@ -609,11 +629,7 @@ func (t *openAIResponsesStreamTranscoder) buildFinalResponseObject() map[string]
 		"status":     "completed",
 		"model":      t.model,
 		"output":     output,
-		"usage": map[string]int{
-			"input_tokens":  t.inputTokens,
-			"output_tokens": t.outputTokens,
-			"total_tokens":  t.inputTokens + t.outputTokens,
-		},
+		"usage":      usageMap,
 	}
 }
 
@@ -1188,10 +1204,13 @@ func sendOpenAISSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 }
 
 func buildOpenAIChatCompletionResponse(responseID string, created int64, model string, anthResp *AnthropicResponse) OpenAIChatCompletionResponse {
-	text, toolCalls := extractAnthropicTextAndToolCalls(anthResp.Content)
+	text, thinking, toolCalls := extractAnthropicBlocks(anthResp.Content)
 	finishReason := mapAnthropicStopReasonToOpenAI(stringValueOrDefault(anthResp.StopReason, "end_turn"))
 	message := map[string]interface{}{
 		"role": "assistant",
+	}
+	if thinking != "" {
+		message["reasoning_content"] = thinking
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -1213,22 +1232,48 @@ func buildOpenAIChatCompletionResponse(responseID string, created int64, model s
 		}},
 	}
 	if anthResp.Usage != nil {
-		resp.Usage = map[string]int{
+		usageMap := map[string]interface{}{
 			"prompt_tokens":     anthResp.Usage.InputTokens,
 			"completion_tokens": anthResp.Usage.OutputTokens,
 			"total_tokens":      anthResp.Usage.InputTokens + anthResp.Usage.OutputTokens,
 		}
+		if thinking != "" {
+			reasoningTokens := (len(thinking) + 3) / 4
+			if reasoningTokens <= 3 && anthResp.Usage.OutputTokens > 3 {
+				estText := (len(text) + 3) / 4
+				if diff := anthResp.Usage.OutputTokens - estText; diff > 0 {
+					reasoningTokens = diff
+				}
+			}
+			if reasoningTokens < 1 {
+				reasoningTokens = 1
+			}
+			usageMap["completion_tokens_details"] = map[string]int{
+				"reasoning_tokens": reasoningTokens,
+			}
+		}
+		resp.Usage = usageMap
 	}
 	return resp
 }
 
 func buildOpenAIResponsesResponse(responseID string, created int64, model string, anthResp *AnthropicResponse, aliasMaps ...map[string]openAIToolIdentity) map[string]interface{} {
-	text, toolCalls := extractAnthropicTextAndToolCalls(anthResp.Content)
+	text, thinking, toolCalls := extractAnthropicBlocks(anthResp.Content)
 	var toolAliases map[string]openAIToolIdentity
 	if len(aliasMaps) > 0 {
 		toolAliases = aliasMaps[0]
 	}
-	output := make([]map[string]interface{}, 0, 1+len(toolCalls))
+	output := make([]map[string]interface{}, 0, 2+len(toolCalls))
+	if thinking != "" {
+		output = append(output, map[string]interface{}{
+			"id":   "rs_" + compactUUID(),
+			"type": "reasoning",
+			"summary": []map[string]interface{}{{
+				"type": "summary_text",
+				"text": thinking,
+			}},
+		})
+	}
 	if text != "" || len(toolCalls) == 0 {
 		output = append(output, map[string]interface{}{
 			"id":     "msg_" + compactUUID(),
@@ -1260,22 +1305,45 @@ func buildOpenAIResponsesResponse(responseID string, created int64, model string
 		"output":     output,
 	}
 	if anthResp.Usage != nil {
-		resp["usage"] = map[string]int{
+		usageMap := map[string]interface{}{
 			"input_tokens":  anthResp.Usage.InputTokens,
 			"output_tokens": anthResp.Usage.OutputTokens,
 			"total_tokens":  anthResp.Usage.InputTokens + anthResp.Usage.OutputTokens,
 		}
+		if thinking != "" {
+			reasoningTokens := (len(thinking) + 3) / 4
+			if reasoningTokens <= 3 && anthResp.Usage.OutputTokens > 3 {
+				estText := (len(text) + 3) / 4
+				if diff := anthResp.Usage.OutputTokens - estText; diff > 0 {
+					reasoningTokens = diff
+				}
+			}
+			if reasoningTokens < 1 {
+				reasoningTokens = 1
+			}
+			usageMap["output_tokens_details"] = map[string]int{
+				"reasoning_tokens": reasoningTokens,
+			}
+		}
+		resp["usage"] = usageMap
 	}
 	return resp
 }
 
-func extractAnthropicTextAndToolCalls(blocks []AnthropicContentBlock) (string, []OpenAIChatToolCall) {
+func extractAnthropicBlocks(blocks []AnthropicContentBlock) (string, string, []OpenAIChatToolCall) {
 	var text strings.Builder
+	var thinking strings.Builder
 	var toolCalls []OpenAIChatToolCall
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
 			text.WriteString(block.Text)
+		case "thinking":
+			if block.Thinking != "" {
+				thinking.WriteString(block.Thinking)
+			} else if block.Signature != "" {
+				thinking.WriteString("Thinking...")
+			}
 		case "tool_use":
 			toolCalls = append(toolCalls, OpenAIChatToolCall{
 				ID:   block.ID,
@@ -1287,7 +1355,12 @@ func extractAnthropicTextAndToolCalls(blocks []AnthropicContentBlock) (string, [
 			})
 		}
 	}
-	return text.String(), toolCalls
+	return text.String(), thinking.String(), toolCalls
+}
+
+func extractAnthropicTextAndToolCalls(blocks []AnthropicContentBlock) (string, []OpenAIChatToolCall) {
+	text, _, toolCalls := extractAnthropicBlocks(blocks)
+	return text, toolCalls
 }
 
 func convertOpenAIChatCompletionRequest(req *OpenAIChatCompletionRequest) (*AnthropicRequest, error) {
@@ -1321,6 +1394,9 @@ func convertOpenAIChatCompletionRequest(req *OpenAIChatCompletionRequest) (*Anth
 		ToolChoice:   normalizeOpenAIToolChoice(req.ToolChoice, req.FunctionCall),
 		OutputConfig: mergeOpenAIOutputConfigEffort(convertOpenAIResponseFormat(req.ResponseFormat), req.ReasoningEffort),
 		Metadata:     openAIMetadataWithPromptCacheKey(req.Metadata, req.PromptCacheKey),
+	}
+	if req.ReasoningEffort != "" {
+		anthReq.Thinking = map[string]interface{}{"type": "enabled"}
 	}
 	return anthReq, nil
 }
@@ -1357,6 +1433,10 @@ func convertOpenAIResponsesRequestWithToolAliases(req *OpenAIResponsesRequest) (
 	if req.Reasoning != nil {
 		reasoningEffort = req.Reasoning.Effort
 	}
+	var thinkingObj interface{}
+	if reasoningEffort != "" {
+		thinkingObj = map[string]interface{}{"type": "enabled"}
+	}
 	return &AnthropicRequest{
 		Model:        model,
 		MaxTokens:    req.MaxOutputTokens,
@@ -1367,6 +1447,7 @@ func convertOpenAIResponsesRequestWithToolAliases(req *OpenAIResponsesRequest) (
 		TopP:         req.TopP,
 		Tools:        toolConversion.Tools,
 		ToolChoice:   toolChoice,
+		Thinking:     thinkingObj,
 		OutputConfig: mergeOpenAIOutputConfigEffort(convertOpenAIResponsesTextFormat(req.Text), reasoningEffort),
 		Metadata:     openAIMetadataWithPromptCacheKey(req.Metadata, req.PromptCacheKey),
 	}, toolConversion.Aliases, nil

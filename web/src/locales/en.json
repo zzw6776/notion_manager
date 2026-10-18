@@ -32,7 +32,8 @@
     "resets_in": "resets in {{time}}",
     "resets_on": "resets on {{date}}",
     "used_percent": "{{percent}}% used",
-    "rolling_remaining": "Rolling available {{percent}}%"
+    "points": "pts",
+    "rolling_remaining": "Rolling available {{percent}}% ({{points}} pts left)"
   },
   "stats": {
     "total_accounts": "Total Accounts",
