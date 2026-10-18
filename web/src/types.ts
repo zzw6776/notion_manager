@@ -42,6 +42,13 @@ export interface AccountInfo {
   premium_limit?: number
   token_v2?: string
   registered_via?: string
+  has_unlimited?: boolean
+  plan_type?: string
+  rolling_usage_percent?: number
+  rolling_reset_at?: number
+  monthly_usage_percent?: number
+  monthly_reset_at?: number
+  monthly_usage?: number
 }
 
 export interface ProviderInfo {

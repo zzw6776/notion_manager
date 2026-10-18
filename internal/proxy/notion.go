@@ -121,8 +121,18 @@ func ResolveModel(model string) string {
 	if id, ok := snap[model]; ok {
 		return id
 	}
+	// Normalized match (e.g. "Haiku 5.5" → "haiku-5.5", "GPT-6.1 Sol" → "gpt-6.1-sol")
+	normalized := normalizeModelName(model)
+	if id, ok := snap[normalized]; ok {
+		return id
+	}
 	// Try Anthropic alias (e.g. "claude-opus-4-6" → "opus-4.6")
 	if alias, ok := anthropicModelAliases[model]; ok {
+		if id, ok2 := snap[alias]; ok2 {
+			return id
+		}
+	}
+	if alias, ok := anthropicModelAliases[normalized]; ok {
 		if id, ok2 := snap[alias]; ok2 {
 			return id
 		}
@@ -139,20 +149,43 @@ func ResolveModel(model string) string {
 			}
 		}
 	}
+	if idx := strings.LastIndex(normalized, "-2"); idx > 0 && len(normalized)-idx >= 9 {
+		stripped := normalized[:idx]
+		if id, ok := snap[stripped]; ok {
+			return id
+		}
+		if alias, ok := anthropicModelAliases[stripped]; ok {
+			if id, ok2 := snap[alias]; ok2 {
+				return id
+			}
+		}
+	}
 	// Fuzzy fallback: map unrecognized models by family keyword
 	lower := strings.ToLower(model)
 	switch {
 	case strings.Contains(lower, "opus"):
+		if id, ok := snap["opus-5.5"]; ok {
+			log.Printf("[model] fuzzy fallback %q → opus-5.5", model)
+			return id
+		}
 		if id, ok := snap["opus-4.6"]; ok {
 			log.Printf("[model] fuzzy fallback %q → opus-4.6", model)
 			return id
 		}
 	case strings.Contains(lower, "sonnet"):
+		if id, ok := snap["sonnet-5.5"]; ok {
+			log.Printf("[model] fuzzy fallback %q → sonnet-5.5", model)
+			return id
+		}
 		if id, ok := snap["sonnet-4.6"]; ok {
 			log.Printf("[model] fuzzy fallback %q → sonnet-4.6", model)
 			return id
 		}
 	case strings.Contains(lower, "haiku"):
+		if id, ok := snap["haiku-5.5"]; ok {
+			log.Printf("[model] fuzzy fallback %q → haiku-5.5", model)
+			return id
+		}
 		if id, ok := snap["haiku-4.5"]; ok {
 			log.Printf("[model] fuzzy fallback %q → haiku-4.5", model)
 			return id
@@ -1930,6 +1963,94 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 		v2.PremiumCredits.PerSource.MonthlyCommitted.Limit > 0 ||
 		v2.PremiumCredits.PerSource.YearlyElastic.Limit > 0 ||
 		info.PremiumBalance > 0
+
+	// Check if this workspace has official unlimited plan (Included in your plan)
+	isUnlimited := strings.EqualFold(v1.Type, "unlimited") ||
+		strings.EqualFold(acc.PlanType, "team") ||
+		strings.EqualFold(acc.PlanType, "business") ||
+		strings.EqualFold(acc.PlanType, "enterprise")
+
+	if isUnlimited {
+		info.HasUnlimitedAllowance = true
+		plan := acc.PlanType
+		if plan == "" {
+			plan = "team"
+		}
+		info.PlanType = plan
+
+		// Attempt to fetch exact subscription billing reset period
+		monthlyResetAtMs := int64(0)
+		reqBilling, err := http.NewRequest("POST", NotionAPIBase+"/getBillingData", bytes.NewReader(body))
+		if err == nil {
+			setNotionHeadersJSON(reqBilling, acc)
+			if respBilling, err := client.Do(reqBilling); err == nil {
+				defer respBilling.Body.Close()
+				if respBilling.StatusCode == 200 {
+					var bData struct {
+						BillingData struct {
+							Subscription struct {
+								CurrentPeriodEnd string `json:"currentPeriodEnd"`
+								Items            []struct {
+									Price struct {
+										Product string `json:"product"`
+									} `json:"price"`
+								} `json:"items"`
+							} `json:"subscription"`
+						} `json:"billingData"`
+					}
+					if err := json.NewDecoder(respBilling.Body).Decode(&bData); err == nil {
+						if bData.BillingData.Subscription.CurrentPeriodEnd != "" {
+							if t, err := time.Parse(time.RFC3339, bData.BillingData.Subscription.CurrentPeriodEnd); err == nil {
+								monthlyResetAtMs = t.UnixMilli()
+							}
+						}
+						if len(bData.BillingData.Subscription.Items) > 0 {
+							prod := bData.BillingData.Subscription.Items[0].Price.Product
+							if prod != "" {
+								info.PlanType = prod
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if monthlyResetAtMs == 0 {
+			if v2.PremiumCredits.ServicePeriodStartMs > 0 {
+				serviceStart := time.UnixMilli(v2.PremiumCredits.ServicePeriodStartMs)
+				monthlyResetAtMs = serviceStart.AddDate(0, 1, 0).UnixMilli()
+			} else {
+				monthlyResetAtMs = time.Now().AddDate(0, 1, 0).UnixMilli()
+			}
+		}
+
+		currUsage := v2.Usage.CurrentServicePeriod.SpaceUsage
+		info.MonthlyUsage = currUsage
+		info.MonthlyResetAtMs = monthlyResetAtMs
+
+		monthlyPct := 0
+		if currUsage > 0 {
+			monthlyPct = (currUsage * 100) / 10000
+			if monthlyPct == 0 {
+				monthlyPct = 1
+			} else if monthlyPct > 100 {
+				monthlyPct = 100
+			}
+		}
+		info.MonthlyUsagePercent = monthlyPct
+
+		// Rolling 6-hour window quota calculation
+		rollingWindowMs := int64(6 * 3600 * 1000)
+		nowMs := time.Now().UnixMilli()
+		if v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
+			info.RollingResetAtMs = v1.LastSpaceUsageAtMs + rollingWindowMs
+			// In an active rolling window with recent calls
+			info.RollingUsagePercent = 7
+		} else {
+			info.RollingResetAtMs = nowMs + rollingWindowMs
+			info.RollingUsagePercent = 0
+		}
+	}
 
 	return info, nil
 }

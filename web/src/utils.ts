@@ -114,3 +114,36 @@ export function formatTimestampMs(ms?: number): string {
     return '—'
   }
 }
+
+export function formatRollingCountdown(resetAtMs?: number, lang?: string): string {
+  if (!resetAtMs) return ''
+  const diff = resetAtMs - Date.now()
+  if (diff <= 0) {
+    return lang === 'zh' ? '已重置' : 'reset'
+  }
+  const totalMins = Math.ceil(diff / (60 * 1000))
+  const hours = Math.floor(totalMins / 60)
+  const mins = totalMins % 60
+  if (lang === 'zh') {
+    if (hours > 0) {
+      return `${hours} 小时 ${mins} 分钟后重置`
+    }
+    return `${mins} 分钟后重置`
+  }
+  if (hours > 0) {
+    return `resets in ${hours}h ${mins}m`
+  }
+  return `resets in ${mins}m`
+}
+
+export function formatMonthlyResetDate(resetAtMs?: number, lang?: string): string {
+  if (!resetAtMs) return ''
+  const date = new Date(resetAtMs)
+  if (isNaN(date.getTime())) return ''
+  if (lang === 'zh') {
+    return `重置于 ${date.getMonth() + 1}月${date.getDate()}日`
+  }
+  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return `resets on ${dateStr}`
+}
+

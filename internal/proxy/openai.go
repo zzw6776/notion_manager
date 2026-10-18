@@ -120,7 +120,7 @@ type OpenAIChatCompletionResponse struct {
 	Created int64                        `json:"created"`
 	Model   string                       `json:"model"`
 	Choices []OpenAIChatCompletionChoice `json:"choices"`
-	Usage   map[string]int               `json:"usage,omitempty"`
+	Usage   map[string]interface{}       `json:"usage,omitempty"`
 }
 
 type OpenAIResponsesTextConfig struct {
@@ -363,6 +363,12 @@ func (t *openAIChatStreamTranscoder) HandleFrame(frame anthropicSSEFrame) error 
 		index := intValue(payload["index"])
 		delta, _ := payload["delta"].(map[string]interface{})
 		switch stringValue(delta["type"]) {
+		case "thinking_delta":
+			text := stringValue(delta["thinking"])
+			if text == "" {
+				return nil
+			}
+			return t.emitChunk(map[string]interface{}{"reasoning_content": text}, nil, nil)
 		case "text_delta":
 			text := stringValue(delta["text"])
 			if text == "" {

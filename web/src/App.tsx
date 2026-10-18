@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
+import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats, Model } from './types'
 import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats } from './api'
 import type { SearchSettings } from './api'
-import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
+import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay, formatRollingCountdown, formatMonthlyResetDate } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
 import { HistoryDrawer } from './components/HistoryDrawer'
@@ -432,6 +432,43 @@ function QuotaBar({ label, labelClass, usage, limit, status }: { label: string; 
   )
 }
 
+function PercentQuotaBar({
+  label,
+  labelClass,
+  percent,
+  rightText,
+}: {
+  label: string
+  labelClass?: string
+  percent: number
+  rightText?: string
+}) {
+  const safePct = Math.min(Math.max(percent || 0, 0), 100)
+  const fillClass = safePct >= 100 ? 'bg-err opacity-40' : safePct >= 80 ? 'bg-warn' : 'bg-ok'
+  const numColor = safePct >= 100 ? 'text-err' : safePct >= 80 ? 'text-warn' : 'text-text-primary'
+
+  return (
+    <div className="mb-2">
+      <div className="flex justify-between items-baseline mb-1">
+        <div className="flex items-center gap-1.5">
+          <span className={`text-[10px] ${labelClass || 'text-text-muted'}`}>{label}</span>
+          <span className={`text-[11px] font-semibold tabular-nums ${numColor}`}>
+            {safePct}%
+          </span>
+        </div>
+        {rightText && (
+          <span className="text-[10px] text-text-muted tabular-nums">
+            {rightText}
+          </span>
+        )}
+      </div>
+      <div className="h-[2.5px] bg-white/[.06] rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-500 ${fillClass}`} style={{ width: `${safePct}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function Badge({ children, variant }: { children: React.ReactNode; variant: 'plan' | 'premium' | 'research' | 'warning' | 'model' }) {
   const cls: Record<string, string> = {
     plan: 'text-text-secondary',
@@ -447,9 +484,57 @@ function Badge({ children, variant }: { children: React.ReactNode; variant: 'pla
   )
 }
 
+function getModelCompany(model: Model): string {
+  const name = (model.name || model.id).toLowerCase()
+  const id = (model.id || '').toLowerCase()
+  if (name.includes('claude') || name.includes('opus') || name.includes('sonnet') || name.includes('haiku') || id.includes('anthropic')) {
+    return 'Anthropic'
+  }
+  if (name.includes('gpt') || name.includes('openai') || id.includes('openai')) {
+    return 'OpenAI'
+  }
+  if (name.includes('gemini') || id.includes('gemini')) {
+    return 'Google'
+  }
+  if (name.includes('grok') || id.includes('xai')) {
+    return 'xAI'
+  }
+  if (name.includes('deepseek') || id.includes('deepseek')) {
+    return 'DeepSeek'
+  }
+  if (name.includes('glm') || id.includes('glm')) {
+    return 'GLM'
+  }
+  if (name.includes('kimi') || id.includes('kimi')) {
+    return 'Kimi'
+  }
+  return 'Other'
+}
+
 function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: () => void }) {
-  const { t } = useTranslation()
-  const [showModels, setShowModels] = useState(false)
+  const { t, i18n } = useTranslation()
+  const [showModels, setShowModels] = useState(true)
+  const [copiedModel, setCopiedModel] = useState<string | null>(null)
+  const getUsableModelId = (name?: string, id?: string) => {
+    if (name) {
+      return name.toLowerCase().trim().replace(/\s+/g, '-')
+    }
+    return id || ''
+  }
+  const groupedModels = useMemo(() => {
+    if (!account.models || account.models.length === 0) return []
+    const map = new Map<string, Model[]>()
+    for (const m of account.models) {
+      const comp = getModelCompany(m)
+      if (!map.has(comp)) map.set(comp, [])
+      map.get(comp)!.push(m)
+    }
+    const sortedCompanies = Array.from(map.keys()).sort((a, b) => a.localeCompare(b))
+    return sortedCompanies.map(company => ({
+      company,
+      models: map.get(company)!.slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
+    }))
+  }, [account.models])
   const spaceQuota = getSpaceQuota(account)
   const userQuota = getUserQuota(account)
   const sameBasicQuota = isSameQuota(spaceQuota, userQuota)
@@ -461,10 +546,12 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   const isAvailable = account.eligible === true && !account.exhausted && !account.permanent && !noWorkspace
   const status = !isAvailable
     ? 'exhausted'
-    : mergeQuotaStatus([
-      getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
-      getQuotaStatusByUsage(userQuota.usage, userQuota.limit),
-    ])
+    : account.has_unlimited
+      ? ((account.rolling_usage_percent ?? 0) >= 100 ? 'exhausted' : (account.rolling_usage_percent ?? 0) >= 80 ? 'low' : 'ok')
+      : mergeQuotaStatus([
+        getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
+        getQuotaStatusByUsage(userQuota.usage, userQuota.limit),
+      ])
   const modelCount = account.models?.length || 0
 
   const dotCls = !isAvailable ? 'bg-err' : status === 'low' ? 'bg-warn' : 'bg-ok'
@@ -539,7 +626,24 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       </div>
 
       {/* Quotas */}
-      {sameBasicQuota ? (
+      {account.has_unlimited ? (
+        <div className="mb-2 p-2 bg-white/[0.02] border border-white/[0.04] rounded">
+          <div className="text-[10px] font-semibold text-text-secondary uppercase tracking-wider mb-1.5 flex items-center justify-between">
+            <span title={t('account.included_in_plan_desc')}>{t('account.included_in_plan')}</span>
+            <span className="text-[9px] font-normal text-ok">Fair Use</span>
+          </div>
+          <PercentQuotaBar
+            label={t('account.rolling_quota')}
+            percent={account.rolling_usage_percent ?? 0}
+            rightText={formatRollingCountdown(account.rolling_reset_at, i18n.language)}
+          />
+          <PercentQuotaBar
+            label={t('account.monthly_quota')}
+            percent={account.monthly_usage_percent ?? 0}
+            rightText={formatMonthlyResetDate(account.monthly_reset_at, i18n.language)}
+          />
+        </div>
+      ) : sameBasicQuota ? (
         <QuotaBar label="Basic" usage={spaceQuota.usage} limit={spaceQuota.limit} />
       ) : (
         <>
@@ -549,17 +653,49 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       )}
       {premium && <QuotaBar label="Premium" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        <span>{t('account.basic_remaining')} {fmt(account.remaining || 0)}</span>
+        {account.has_unlimited ? (
+          <span>{t('account.rolling_remaining', { percent: 100 - (account.rolling_usage_percent || 0) })}</span>
+        ) : (
+          <span>{t('account.basic_remaining')} {fmt(account.remaining || 0)}</span>
+        )}
         {premium && <span>{t('account.premium_remaining')} {fmt(account.premium_balance || 0)}</span>}
       </div>
 
-      {/* Models (expandable) */}
-      {showModels && account.models && account.models.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-1.5 mb-1">
-          {account.models.map(m => (
-            <span key={m.id} className="text-[10px] px-1.5 py-0.5 bg-white/[.06] rounded text-text-secondary">
-              {m.name || m.id}
-            </span>
+      {/* Models (grouped by company, sorted alphabetically) */}
+      {showModels && groupedModels.length > 0 && (
+        <div className="mt-2.5 pt-2 border-t border-white/[0.06] space-y-2">
+          {groupedModels.map(({ company, models }) => (
+            <div key={company} className="flex flex-col gap-1">
+              <div className="text-[10px] font-semibold text-text-muted flex items-center gap-1.5 uppercase tracking-wider">
+                <span className="w-1.5 h-1.5 rounded-full bg-white/20" />
+                {company} <span className="text-[9px] font-normal opacity-60">({models.length})</span>
+              </div>
+              <div className="flex flex-wrap gap-1 pl-2.5">
+                {models.map(m => {
+                  const usableId = getUsableModelId(m.name, m.id)
+                  const isCopied = copiedModel === usableId
+                  return (
+                    <span
+                      key={m.id}
+                      onClick={e => {
+                        e.stopPropagation()
+                        navigator.clipboard.writeText(usableId)
+                        setCopiedModel(usableId)
+                        setTimeout(() => setCopiedModel(null), 1500)
+                      }}
+                      title={`点击复制标准模型 ID: ${usableId}`}
+                      className={`text-[10px] px-1.5 py-0.5 rounded transition-all cursor-pointer select-none ${
+                        isCopied
+                          ? 'bg-ok/20 text-ok border border-ok/40 font-medium'
+                          : 'bg-white/[.06] text-text-secondary hover:bg-white/[.15] hover:text-white'
+                      }`}
+                    >
+                      {isCopied ? `✓ ${usableId} (已复制)` : (m.name || m.id)}
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
           ))}
         </div>
       )}

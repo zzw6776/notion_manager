@@ -1075,9 +1075,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				}
 			}
 
-			// For streaming responses, default to emitting thinking blocks even when
+			// For streaming responses, or requests specifying reasoning effort, default to emitting thinking blocks even when
 			// the client did not explicitly request Anthropic thinking.
-			hasThinking := req.Thinking != nil || req.Stream
+			hasThinking := req.Thinking != nil || req.Stream || (req.OutputConfig != nil && req.OutputConfig.Effort != "")
 			var reqErr error
 			if isResearcher {
 				// Researcher mode — always use thinking blocks for research progress

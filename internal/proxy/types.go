@@ -61,21 +61,43 @@ type QuotaInfo struct {
 	PremiumBalance int  `json:"premiumBalance"` // remaining premium credits
 	PremiumUsage   int  `json:"premiumUsage"`   // used premium credits (monthlyAllocated)
 	PremiumLimit   int  `json:"premiumLimit"`   // total premium credit limit
+
+	// Official Paid Plan Quota (Included in your plan)
+	PlanType              string `json:"planType,omitempty"`           // "team", "business", "free" 等
+	HasUnlimitedAllowance bool   `json:"hasUnlimitedAllowance"`        // 是否享有方案内基础无限额度 (Included in your plan)
+	RollingUsagePercent   int    `json:"rollingUsagePercent"`          // 滚动使用率 (如 7%)
+	RollingResetAtMs      int64  `json:"rollingResetAtMs,omitempty"`   // 滚动重置截止时间戳 (毫秒)
+	MonthlyUsagePercent   int    `json:"monthlyUsagePercent"`          // 月度使用率 (如 1%)
+	MonthlyResetAtMs      int64  `json:"monthlyResetAtMs,omitempty"`   // 月度重置时间戳 (毫秒)
+	MonthlyUsage          int    `json:"monthlyUsage,omitempty"`       // 当月实际调用量
 }
 
 // quotaV1Response is the raw response from getAIUsageEligibility
 type quotaV1Response struct {
-	IsEligible         bool  `json:"isEligible"`
-	ResearchModeUsage  int   `json:"researchModeUsage"`
-	SpaceUsage         int   `json:"spaceUsage"`
-	SpaceLimit         int   `json:"spaceLimit"`
-	UserUsage          int   `json:"userUsage"`
-	UserLimit          int   `json:"userLimit"`
-	LastSpaceUsageAtMs int64 `json:"lastSpaceUsageAtMs"`
+	IsEligible         bool   `json:"isEligible"`
+	Type               string `json:"type"` // "unlimited" on paid plans
+	ResearchModeUsage  int    `json:"researchModeUsage"`
+	SpaceUsage         int    `json:"spaceUsage"`
+	SpaceLimit         int    `json:"spaceLimit"`
+	UserUsage          int    `json:"userUsage"`
+	UserLimit          int    `json:"userLimit"`
+	LastSpaceUsageAtMs int64  `json:"lastSpaceUsageAtMs"`
 }
 
 // quotaV2Response is the raw response from getAIUsageEligibilityV2 (premium credits)
 type quotaV2Response struct {
+	Usage struct {
+		CurrentServicePeriod struct {
+			SpaceUsage int `json:"spaceUsage"`
+			UserUsage  int `json:"userUsage"`
+		} `json:"currentServicePeriod"`
+		Lifetime struct {
+			SpaceUsage int `json:"spaceUsage"`
+			UserUsage  int `json:"userUsage"`
+		} `json:"lifetime"`
+		TotalCreditBalance int   `json:"totalCreditBalance"`
+		LastSpaceUsageAtMs int64 `json:"lastSpaceUsageAtMs"`
+	} `json:"usage"`
 	BasicCredits struct {
 		SpaceUsage         int   `json:"spaceUsage"`
 		SpaceLimit         int   `json:"spaceLimit"`
@@ -100,6 +122,7 @@ type quotaV2Response struct {
 				Limit      int `json:"limit"`
 			} `json:"yearlyElastic"`
 		} `json:"perSource"`
+		ServicePeriodStartMs int64 `json:"servicePeriodStartMs"`
 	} `json:"premiumCredits"`
 }
 

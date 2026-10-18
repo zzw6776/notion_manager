@@ -655,6 +655,9 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 	if info == nil {
 		return res
 	}
+	if info.HasUnlimitedAllowance && info.PlanType != "" && (acc.PlanType == "" || acc.PlanType == "free" || acc.PlanType == "personal") {
+		acc.PlanType = info.PlanType
+	}
 	res.BasicLeft = basicRemaining(info)
 	res.HasPremium = info.HasPremium
 	if info.IsEligible {
@@ -673,7 +676,7 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 		acc.QuotaExhaustedAt = &now
 	}
 	isFree := false
-	if !(info.HasPremium || info.PremiumLimit > 0 || info.PremiumBalance > 0) {
+	if !(info.HasPremium || info.PremiumLimit > 0 || info.PremiumBalance > 0 || info.HasUnlimitedAllowance) {
 		switch strings.ToLower(strings.TrimSpace(acc.PlanType)) {
 		case "personal", "free", "":
 			isFree = true
@@ -1286,17 +1289,24 @@ func saveAccountFile(dir string, acc *Account) error {
 	}
 	if acc.QuotaInfo != nil {
 		existing["quota_info"] = map[string]interface{}{
-			"is_eligible":         acc.QuotaInfo.IsEligible,
-			"space_usage":         acc.QuotaInfo.SpaceUsage,
-			"space_limit":         acc.QuotaInfo.SpaceLimit,
-			"user_usage":          acc.QuotaInfo.UserUsage,
-			"user_limit":          acc.QuotaInfo.UserLimit,
-			"last_usage_at":       acc.QuotaInfo.LastUsageAtMs,
-			"research_mode_usage": acc.QuotaInfo.ResearchModeUsage,
-			"has_premium":         acc.QuotaInfo.HasPremium,
-			"premium_balance":     acc.QuotaInfo.PremiumBalance,
-			"premium_usage":       acc.QuotaInfo.PremiumUsage,
-			"premium_limit":       acc.QuotaInfo.PremiumLimit,
+			"is_eligible":             acc.QuotaInfo.IsEligible,
+			"space_usage":             acc.QuotaInfo.SpaceUsage,
+			"space_limit":             acc.QuotaInfo.SpaceLimit,
+			"user_usage":              acc.QuotaInfo.UserUsage,
+			"user_limit":              acc.QuotaInfo.UserLimit,
+			"last_usage_at":           acc.QuotaInfo.LastUsageAtMs,
+			"research_mode_usage":     acc.QuotaInfo.ResearchModeUsage,
+			"has_premium":             acc.QuotaInfo.HasPremium,
+			"premium_balance":         acc.QuotaInfo.PremiumBalance,
+			"premium_usage":           acc.QuotaInfo.PremiumUsage,
+			"premium_limit":           acc.QuotaInfo.PremiumLimit,
+			"has_unlimited_allowance": acc.QuotaInfo.HasUnlimitedAllowance,
+			"plan_type":               acc.QuotaInfo.PlanType,
+			"rolling_usage_percent":   acc.QuotaInfo.RollingUsagePercent,
+			"rolling_reset_at":        acc.QuotaInfo.RollingResetAtMs,
+			"monthly_usage_percent":   acc.QuotaInfo.MonthlyUsagePercent,
+			"monthly_reset_at":        acc.QuotaInfo.MonthlyResetAtMs,
+			"monthly_usage":           acc.QuotaInfo.MonthlyUsage,
 		}
 	}
 	if acc.QuotaCheckedAt != nil {
@@ -1454,6 +1464,14 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 			entry["premium_balance"] = quota.Info.PremiumBalance
 			entry["premium_usage"] = quota.Info.PremiumUsage
 			entry["premium_limit"] = quota.Info.PremiumLimit
+			// Unlimited allowance (Included in your plan)
+			entry["has_unlimited"] = quota.Info.HasUnlimitedAllowance
+			entry["plan_type"] = quota.Info.PlanType
+			entry["rolling_usage_percent"] = quota.Info.RollingUsagePercent
+			entry["rolling_reset_at"] = quota.Info.RollingResetAtMs
+			entry["monthly_usage_percent"] = quota.Info.MonthlyUsagePercent
+			entry["monthly_reset_at"] = quota.Info.MonthlyResetAtMs
+			entry["monthly_usage"] = quota.Info.MonthlyUsage
 		}
 		if quota.CheckedAt != nil {
 			entry["checked_at"] = quota.CheckedAt.Format(time.RFC3339)
@@ -1510,6 +1528,14 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 			entry["premium_balance"] = quota.Info.PremiumBalance
 			entry["premium_usage"] = quota.Info.PremiumUsage
 			entry["premium_limit"] = quota.Info.PremiumLimit
+			// Unlimited allowance (Included in your plan)
+			entry["has_unlimited"] = quota.Info.HasUnlimitedAllowance
+			entry["plan_type"] = quota.Info.PlanType
+			entry["rolling_usage_percent"] = quota.Info.RollingUsagePercent
+			entry["rolling_reset_at"] = quota.Info.RollingResetAtMs
+			entry["monthly_usage_percent"] = quota.Info.MonthlyUsagePercent
+			entry["monthly_reset_at"] = quota.Info.MonthlyResetAtMs
+			entry["monthly_usage"] = quota.Info.MonthlyUsage
 		}
 		if quota.CheckedAt != nil {
 			entry["checked_at"] = quota.CheckedAt.Format(time.RFC3339)
@@ -1548,34 +1574,48 @@ func loadPersistedWorkspace(data []byte, acc *Account) {
 func loadPersistedQuotaInfo(data []byte) *QuotaInfo {
 	var raw struct {
 		QuotaInfo *struct {
-			IsEligible        bool  `json:"is_eligible"`
-			SpaceUsage        int   `json:"space_usage"`
-			SpaceLimit        int   `json:"space_limit"`
-			UserUsage         int   `json:"user_usage"`
-			UserLimit         int   `json:"user_limit"`
-			LastUsageAt       int64 `json:"last_usage_at"`
-			ResearchModeUsage int   `json:"research_mode_usage"`
-			HasPremium        bool  `json:"has_premium"`
-			PremiumBalance    int   `json:"premium_balance"`
-			PremiumUsage      int   `json:"premium_usage"`
-			PremiumLimit      int   `json:"premium_limit"`
+			IsEligible            bool   `json:"is_eligible"`
+			SpaceUsage            int    `json:"space_usage"`
+			SpaceLimit            int    `json:"space_limit"`
+			UserUsage             int    `json:"user_usage"`
+			UserLimit             int    `json:"user_limit"`
+			LastUsageAt           int64  `json:"last_usage_at"`
+			ResearchModeUsage     int    `json:"research_mode_usage"`
+			HasPremium            bool   `json:"has_premium"`
+			PremiumBalance        int    `json:"premium_balance"`
+			PremiumUsage          int    `json:"premium_usage"`
+			PremiumLimit          int    `json:"premium_limit"`
+			HasUnlimitedAllowance bool   `json:"has_unlimited_allowance"`
+			PlanType              string `json:"plan_type"`
+			RollingUsagePercent   int    `json:"rolling_usage_percent"`
+			RollingResetAt        int64  `json:"rolling_reset_at"`
+			MonthlyUsagePercent   int    `json:"monthly_usage_percent"`
+			MonthlyResetAt        int64  `json:"monthly_reset_at"`
+			MonthlyUsage          int    `json:"monthly_usage"`
 		} `json:"quota_info"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil || raw.QuotaInfo == nil {
 		return nil
 	}
 	return &QuotaInfo{
-		IsEligible:        raw.QuotaInfo.IsEligible,
-		SpaceUsage:        raw.QuotaInfo.SpaceUsage,
-		SpaceLimit:        raw.QuotaInfo.SpaceLimit,
-		UserUsage:         raw.QuotaInfo.UserUsage,
-		UserLimit:         raw.QuotaInfo.UserLimit,
-		LastUsageAtMs:     raw.QuotaInfo.LastUsageAt,
-		ResearchModeUsage: raw.QuotaInfo.ResearchModeUsage,
-		HasPremium:        raw.QuotaInfo.HasPremium,
-		PremiumBalance:    raw.QuotaInfo.PremiumBalance,
-		PremiumUsage:      raw.QuotaInfo.PremiumUsage,
-		PremiumLimit:      raw.QuotaInfo.PremiumLimit,
+		IsEligible:            raw.QuotaInfo.IsEligible,
+		SpaceUsage:            raw.QuotaInfo.SpaceUsage,
+		SpaceLimit:            raw.QuotaInfo.SpaceLimit,
+		UserUsage:             raw.QuotaInfo.UserUsage,
+		UserLimit:             raw.QuotaInfo.UserLimit,
+		LastUsageAtMs:         raw.QuotaInfo.LastUsageAt,
+		ResearchModeUsage:     raw.QuotaInfo.ResearchModeUsage,
+		HasPremium:            raw.QuotaInfo.HasPremium,
+		PremiumBalance:        raw.QuotaInfo.PremiumBalance,
+		PremiumUsage:          raw.QuotaInfo.PremiumUsage,
+		PremiumLimit:          raw.QuotaInfo.PremiumLimit,
+		HasUnlimitedAllowance: raw.QuotaInfo.HasUnlimitedAllowance,
+		PlanType:              raw.QuotaInfo.PlanType,
+		RollingUsagePercent:   raw.QuotaInfo.RollingUsagePercent,
+		RollingResetAtMs:      raw.QuotaInfo.RollingResetAt,
+		MonthlyUsagePercent:   raw.QuotaInfo.MonthlyUsagePercent,
+		MonthlyResetAtMs:      raw.QuotaInfo.MonthlyResetAt,
+		MonthlyUsage:          raw.QuotaInfo.MonthlyUsage,
 	}
 }
 
@@ -1593,6 +1633,16 @@ func quotaRemaining(limit, usage int) int {
 func basicRemaining(info *QuotaInfo) int {
 	if info == nil {
 		return 0
+	}
+	if info.HasUnlimitedAllowance {
+		if info.RollingUsagePercent >= 100 {
+			return 0
+		}
+		rem := 100 - info.RollingUsagePercent
+		if rem <= 0 {
+			return 1
+		}
+		return rem
 	}
 	remaining := []int{}
 	if info.SpaceLimit > 0 {

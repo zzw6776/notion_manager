@@ -24,7 +24,15 @@
     "recent_ai": "Recent AI {{date}}",
     "unavailable": "Unavailable ⚠",
     "open_proxy": "Open Proxy →",
-    "quota_unified": "Space / User Quotas match"
+    "quota_unified": "Space / User Quotas match",
+    "included_in_plan": "Included in your plan",
+    "included_in_plan_desc": "Applies to Notion AI features. Products that use credits (such as custom agents and Workers) do not count toward this allowance.",
+    "rolling_quota": "Rolling (6h)",
+    "monthly_quota": "Monthly",
+    "resets_in": "resets in {{time}}",
+    "resets_on": "resets on {{date}}",
+    "used_percent": "{{percent}}% used",
+    "rolling_remaining": "Rolling available {{percent}}%"
   },
   "stats": {
     "total_accounts": "Total Accounts",
