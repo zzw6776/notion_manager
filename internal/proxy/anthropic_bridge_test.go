@@ -222,3 +222,172 @@ func TestDetectToolBridgeNoToolResponse_DoesNotMatchNormalAnswer(t *testing.T) {
 		t.Fatalf("normal answer should not be classified as no-tool identity drift")
 	}
 }
+
+func TestSanitizeLLMJSON_RepairsInvalidEscapesAndTrailingCommas(t *testing.T) {
+	input := `{"name": "test", "arguments": {"path": "C:\work\dir\test.txt", "regex": "\s+\d+", "broken": "\施顺序",},}`
+	sanitized := sanitizeLLMJSON(input)
+	if !strings.Contains(sanitized, `\\work\\dir`) {
+		t.Fatalf("expected escaped backslashes in path, got: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, `\\s+\\d+`) {
+		t.Fatalf("expected escaped regex backslashes, got: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, `\\施顺序`) {
+		t.Fatalf("expected escaped non-ascii escape, got: %s", sanitized)
+	}
+}
+
+func TestParseToolCalls_RepairsInvalidEscapeInMarkdownFence(t *testing.T) {
+	content := "```json\n{\"name\": \"__done__\", \"arguments\": {\"result\": \"## 综合最优方案\\n\\n总体思路：不重写同步协议\\n\\施顺序\\n1. 第一步\"}}\n```"
+	calls, remaining, ok := parseToolCalls(content)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected tool call to be parsed from fenced markdown with invalid escape, got: ok=%v, calls=%v", ok, calls)
+	}
+	if calls[0].Function.Name != "__done__" {
+		t.Fatalf("expected __done__ function call, got: %s", calls[0].Function.Name)
+	}
+	if remaining != "" {
+		t.Fatalf("expected empty remaining text, got: %q", remaining)
+	}
+}
+
+func TestPrepareToolBridgeResponse_InterceptsDoneWithInvalidEscape(t *testing.T) {
+	content := "```json\n{\"name\": \"__done__\", \"arguments\": {\"result\": \"## 综合最优方案\\n\\n总体思路：不重写同步协议\\n\\施顺序\\n1. 第一步\"}}\n```"
+	prepared := prepareToolBridgeResponse(content, nil)
+	if prepared.DoneText == "" {
+		t.Fatalf("expected DoneText to be intercepted and extracted")
+	}
+	if !strings.Contains(prepared.DoneText, "## 综合最优方案") || !strings.Contains(prepared.DoneText, "施顺序") {
+		t.Fatalf("unexpected DoneText content: %q", prepared.DoneText)
+	}
+	if prepared.HasCalls {
+		t.Fatalf("expected HasCalls to be false after __done__ interception, got true")
+	}
+}
+
+func TestPrepareToolBridgeResponse_FallbackDoneRecoveryWhenUnparsed(t *testing.T) {
+	// A severely malformed output where JSON parser cannot parse the tool call object
+	content := "```json\n{\"name\": \"__done__\", \"arguments\": {\"result\": \"Plan content here...\"} trailing gibberish"
+	prepared := prepareToolBridgeResponse(content, nil)
+	if prepared.DoneText == "" {
+		t.Fatalf("expected fallback extractor to recover DoneText from unparsed __done__")
+	}
+	if prepared.DoneText != "Plan content here..." {
+		t.Fatalf("expected 'Plan content here...', got: %q", prepared.DoneText)
+	}
+}
+
+func TestCleanAllLangTags_PreservesCodeGenericsAndMultiline(t *testing.T) {
+	// 1. Simulating msg_f8893cec: incomplete <lang prefix followed by multiline text with Rust Mutex<()>
+	rawWithIncompleteLang := "<lang primary=\"en-\n\n```rust\nlet mut guard = self.lock.lock();\nlet x = Mutex<()>::new();\n```\nAll done."
+	cleaned := cleanAllLangTags(rawWithIncompleteLang)
+	want := "\n\n```rust\nlet mut guard = self.lock.lock();\nlet x = Mutex<()>::new();\n```\nAll done."
+	if cleaned != want {
+		t.Fatalf("cleanAllLangTags corrupted multiline code with generics:\ngot:\n%s\nwant:\n%s", cleaned, want)
+	}
+
+	// 2. Normal self-closing tag
+	rawNormal := "<lang primary=\"zh-CN\"/>\n\nSome text here"
+	if got := cleanAllLangTags(rawNormal); got != "\n\nSome text here" {
+		t.Fatalf("cleanAllLangTags failed on normal self-closing tag: got %q", got)
+	}
+
+	// 3. Normal tag with multiple attributes
+	rawMulti := "<lang primary=\"en-US\" secondary=\"zh-CN\"/>\n\nSome text here"
+	if got := cleanAllLangTags(rawMulti); got != "\n\nSome text here" {
+		t.Fatalf("cleanAllLangTags failed on multi-attr tag: got %q", got)
+	}
+
+	// 4. Code without any lang tag containing generics
+	rawCode := "```rust\nlet v: Vec<String> = vec![];\nlet m: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));\n```"
+	if got := cleanAllLangTags(rawCode); got != rawCode {
+		t.Fatalf("cleanAllLangTags damaged code without lang tag: got %q", got)
+	}
+
+	// 5. Code with expression containing '<lang' in condition
+	rawExpr := "if a <lang && b > 10 {\n    println!(\"hello\");\n}"
+	if got := cleanAllLangTags(rawExpr); got != rawExpr {
+		t.Fatalf("cleanAllLangTags damaged expression: got %q", got)
+	}
+}
+
+func TestHandlePatchReplace_SafePrefixReplacement(t *testing.T) {
+	// 1. Incomplete <lang prefix at start should be replaced
+	current := "<lang primary=\"en-US"
+	replacement := "OK"
+	if got := handlePatchReplace(current, replacement); got != "OK" {
+		t.Fatalf("expected 'OK', got %q", got)
+	}
+
+	// 3. Incomplete tag split mid-attribute: '<lang prim' must become ''
+	if got := handlePatchReplace("<lang prim", "{"); got != "{" {
+		t.Fatalf("expected '{', got %q", got)
+	}
+}
+
+func TestCleanAllLangTags_NeverLeaksPartialAttributeFragments(t *testing.T) {
+	// Recreating the exact real-world scenario from 23:28
+	// Notion sends `<lang prim` chunk, which must NEVER leak "prim"
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"<lang prim", ""},
+		{"<lang p", ""},
+		{"<lang primary=\"z", ""},
+		{"<lang primary=\"zh-CN\"", ""},
+		{"<lang primary=\"zh-CN\"/", ""},
+		{"<lang primary=\"zh-CN\"/>", ""},
+		{"<lang prim{\"name\":\"exec_command\"}", "{\"name\":\"exec_command\"}"},
+		{"<lang prim\n\n1. Mutex<()>", "\n\n1. Mutex<()>"},
+		{"<lang primary=\"en-\n\n1. Mutex<()>", "\n\n1. Mutex<()>"},
+	}
+
+	for _, tc := range cases {
+		got := cleanAllLangTags(tc.input)
+		if got != tc.want {
+			t.Fatalf("cleanAllLangTags(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestParseToolCalls_ResilientToNoisyPrefix(t *testing.T) {
+	// Test direct JSON with a "prim" or garbage prefix
+	content := `prim{"name":"exec_command","arguments":{"cmd":"echo hello"}}`
+	calls, remaining, ok := parseToolCalls(content)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected 1 tool call parsed despite 'prim' prefix, got ok=%v, calls=%v", ok, calls)
+	}
+	if calls[0].Function.Name != "exec_command" {
+		t.Fatalf("expected 'exec_command', got %q", calls[0].Function.Name)
+	}
+	if remaining != "" {
+		t.Fatalf("expected empty remaining, got %q", remaining)
+	}
+}
+
+func TestParseToolCalls_SupportsFunctionAliasAndClaudeCodeBash(t *testing.T) {
+	// Recreating the exact Claude Code response from screenshot:
+	// {"function": "Bash", "arguments": {"command": "git status && git diff HEAD", "description": "查看未提交的代码变更以进行审查"}}
+	content := `{"function": "Bash", "arguments": {"command": "git status && git diff HEAD", "description": "查看未提交的代码变更以进行审查"}}`
+	calls, remaining, ok := parseToolCalls(content)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected 1 tool call parsed for 'function' key, got ok=%v, calls=%v", ok, calls)
+	}
+	if calls[0].Function.Name != "Bash" {
+		t.Fatalf("expected function name 'Bash', got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "git status && git diff HEAD") {
+		t.Fatalf("expected arguments to contain command, got %q", calls[0].Function.Arguments)
+	}
+	if remaining != "" {
+		t.Fatalf("expected empty remaining, got %q", remaining)
+	}
+
+	prepared := prepareToolBridgeResponse(content, nil)
+	if !prepared.HasCalls {
+		t.Fatalf("expected HasCalls to be true in prepareToolBridgeResponse")
+	}
+}
+
+

@@ -2796,8 +2796,11 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 			emitThinking(incrementalSuffix(prev, patchThinkingContent))
 		case "text":
 			if entry.Content != "" {
-				if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 && !strings.Contains(rawText[idx:], ">") {
-					rawText = rawText[:idx]
+				if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 {
+					tail := rawText[idx:]
+					if !strings.Contains(tail, ">") && !strings.Contains(tail, "\n") && len(tail) < 150 {
+						rawText = rawText[:idx]
+					}
 				}
 				rawText += entry.Content
 				emitDelta()
@@ -2839,6 +2842,14 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		case "text":
 			if entry.Content != "" {
 				lastSyncText = entry.Content
+				// If rawText only contains an incomplete <lang prefix, reset it using sync text
+				if rawText != "" && len(rawText) < 150 && !strings.Contains(rawText, ">") && unclosedLangPrefixRegex.MatchString(rawText) {
+					rawText = cleanAllLangTags(entry.Content)
+					emitDelta()
+				} else if rawText != "" && len(entry.Content) > len(rawText) && strings.HasPrefix(entry.Content, rawText) {
+					rawText = entry.Content
+					emitDelta()
+				}
 			}
 			// Snapshot text from patch-sync must NEVER be appended to rawText.
 			// Incremental text is streamed via patch ops ("x" / "p").
@@ -3150,9 +3161,12 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 
 				// Handle remove operations on value entries
 				if op.O == "r" && strings.Contains(op.P, "/value/") {
-					if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 && !strings.Contains(rawText[idx:], ">") {
-						rawText = rawText[:idx]
-						emitDelta()
+					if idx := strings.LastIndex(rawText, "<lang"); idx >= 0 {
+						tail := rawText[idx:]
+						if !strings.Contains(tail, ">") && !strings.Contains(tail, "\n") && len(tail) < 150 {
+							rawText = rawText[:idx]
+							emitDelta()
+						}
 					}
 					continue
 				}
@@ -3219,6 +3233,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					default: // "text" or unknown
 						switch op.O {
 						case "x":
+							if lastSyncText != "" && len(lastSyncText) > len(rawText) && strings.HasPrefix(lastSyncText, rawText) {
+								rawText = lastSyncText
+							}
 							rawText += text
 							emitDelta()
 						case "p":
@@ -3280,36 +3297,43 @@ func classifyPatchContent(path string, valueTypes map[string]string) string {
 	return "text" // fallback: treat unknown as text
 }
 
+var (
+	// completeLangTagRegex matches complete <lang ...> or <lang .../> tags on a single line.
+	// It strictly validates attribute names and values to avoid matching generic code like Mutex<()>.
+	completeLangTagRegex = regexp.MustCompile(`(?i)<lang(?:\s+[a-zA-Z_:][a-zA-Z0-9_\.:-]*(?:="[^"]*")?)*\s*(?:/>|>)`)
+
+	// unclosedLangPrefixRegex matches an unclosed <lang ... tag prefix at the beginning of text,
+	// only consuming valid XML tag characters (letters, numbers, quotes, =, -, _, /, spaces).
+	unclosedLangPrefixRegex = regexp.MustCompile(`(?i)^<lang[ \ta-zA-Z0-9="\'\-_/]{0,150}[ \t]*`)
+
+	// unclosedLangSuffixRegex matches an unclosed <lang ... tag prefix at the end of text.
+	unclosedLangSuffixRegex = regexp.MustCompile(`(?i)[ \t]*<lang[ \ta-zA-Z0-9="\'\-_/]{0,150}$`)
+)
+
 func handlePatchReplace(current, replacement string) string {
+	// If current ends with an unclosed <lang prefix (no '>', no newline, < 150 chars),
+	// replace that prefix with replacement.
 	if idx := strings.LastIndex(current, "<lang"); idx >= 0 {
-		return current[:idx] + replacement
+		tail := current[idx:]
+		if !strings.Contains(tail, ">") && !strings.Contains(tail, "\n") && len(tail) < 150 {
+			return current[:idx] + replacement
+		}
 	}
 	return current + replacement
 }
 
 // cleanAllLangTags removes all complete <lang .../> tags from text.
-// Incomplete tags at the end are also stripped (they'll be completed in a future delta).
+// Unclosed <lang ... prefixes at the start or end of text are also stripped safely
+// without consuming subsequent content or code generics like Mutex<()>.
 func cleanAllLangTags(text string) string {
-	for {
-		start := strings.Index(text, "<lang")
-		if start < 0 {
-			break
-		}
-		end := strings.Index(text[start:], "/>")
-		if end >= 0 {
-			text = text[:start] + text[start+end+2:]
-			continue
-		}
-		gt := strings.Index(text[start:], ">")
-		if gt >= 0 {
-			text = text[:start] + text[start+gt+1:]
-			continue
-		}
-		// Incomplete tag at end — strip it; will be completed later
-		text = text[:start]
-		break
+	if !strings.Contains(text, "<lang") && !strings.Contains(text, "<LANG") {
+		return text
 	}
-	return text
+
+	cleaned := completeLangTagRegex.ReplaceAllString(text, "")
+	cleaned = unclosedLangPrefixRegex.ReplaceAllString(cleaned, "")
+	cleaned = unclosedLangSuffixRegex.ReplaceAllString(cleaned, "")
+	return cleaned
 }
 
 // trimTrailingIncompleteCitation drops an unfinished citation suffix so

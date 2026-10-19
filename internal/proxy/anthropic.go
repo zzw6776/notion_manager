@@ -519,21 +519,38 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry)
 		for _, tc := range prepared.ToolCalls {
 			if tc.Function.Name == "__done__" {
 				var args map[string]interface{}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
-					if r, ok := args["result"].(string); ok {
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+					sanitizedArgs := sanitizeLLMJSON(tc.Function.Arguments)
+					_ = json.Unmarshal([]byte(sanitizedArgs), &args)
+				}
+				if args != nil {
+					if r, ok := args["result"].(string); ok && r != "" {
 						prepared.DoneText = r
 					}
 				}
 				if prepared.DoneText == "" {
+					prepared.DoneText = extractResultField(tc.Function.Arguments)
+				}
+				if prepared.DoneText == "" {
 					prepared.DoneText = tc.Function.Arguments
 				}
-				log.Printf("[bridge] __done__ intercepted: %s", prepared.DoneText)
+				log.Printf("[bridge] __done__ intercepted: %s", truncateForLog(prepared.DoneText, 200))
 			} else {
 				realCalls = append(realCalls, tc)
 			}
 		}
 		prepared.ToolCalls = realCalls
 		prepared.HasCalls = len(prepared.ToolCalls) > 0
+	}
+
+	// Fallback: If no tool calls were detected (or all were rejected), but content contains __done__,
+	// recover the __done__ text so the raw JSON wrapper is never shown to the client.
+	if !prepared.HasCalls && prepared.DoneText == "" && strings.Contains(content, "__done__") {
+		if doneText, remaining := extractFallbackDoneText(content); doneText != "" {
+			prepared.DoneText = doneText
+			prepared.Remaining = remaining
+			log.Printf("[bridge] __done__ recovered via fallback extractor: %s", truncateForLog(doneText, 200))
+		}
 	}
 
 	if prepared.HasCalls {
@@ -2161,7 +2178,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		}
 
 		// When tool actions were detected, suppress residual framing / identity text.
-		if remaining != "" && hasCalls {
+		if remaining != "" && (hasCalls || doneText != "" || prepared.WebSearchQuery != "") {
 			log.Printf("[bridge] suppressed %d chars of residual tool framing text", len(remaining))
 		} else if remaining != "" {
 			contentBlocks = append(contentBlocks, AnthropicContentBlock{Type: "text", Text: remaining})

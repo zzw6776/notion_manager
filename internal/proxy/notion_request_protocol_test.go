@@ -728,3 +728,95 @@ func requireTranscriptValueMap(t *testing.T, message ResearcherTranscriptMsg) ma
 	}
 	return value
 }
+
+func TestParseNDJSONStream_PreservesCodeGenericsWithUnclosedLang(t *testing.T) {
+	// Recreates the real-world bug where Notion sends <lang primary="en- (unclosed)
+	// followed by Rust code containing Mutex<()>.
+	stream := strings.Join([]string{
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/value/-","v":{"type":"text","content":"<lang primary=\"en-"}}]}`,
+		"{\"type\":\"patch\",\"v\":[{\"o\":\"x\",\"p\":\"/s/1/value/0/content\",\"v\":\"\\n\\n```rust\\nlet x = Mutex<()>::new();\\n```\\nAll done.\"}]}",
+	}, "\n")
+
+	var textOutput strings.Builder
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if delta != "" {
+			textOutput.WriteString(delta)
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+
+	got := textOutput.String()
+	want := "\n\n```rust\nlet x = Mutex<()>::new();\n```\nAll done."
+	if got != want {
+		t.Fatalf("expected preserved code generics, got %q, want %q", got, want)
+	}
+}
+
+func TestParseNDJSONStream_NeverEmitsPartialLangAttributeDuringStream(t *testing.T) {
+	// Recreates the exact 23:28 incident from server logs:
+	// Chunk 1: adds `<lang prim`
+	// Chunk 2: appends `ary="z`
+	// Chunk 3: replaces `/content` with `{`
+	// Chunk 4: appends `"name":"exec_command"}`
+	stream := strings.Join([]string{
+		`{"type":"patch","v":[{"o":"a","p":"/s/5/value/-","v":{"type":"text","content":"<lang prim"}}]}`,
+		`{"type":"patch","v":[{"o":"x","p":"/s/5/value/0/content","v":"ary=\"z"}]}`,
+		`{"type":"patch","v":[{"o":"p","p":"/s/5/value/0/content","v":"{"}]}`,
+		`{"type":"patch","v":[{"o":"x","p":"/s/5/value/0/content","v":"\"name\":\"exec_command\"}"}]}`,
+	}, "\n")
+
+	var deltas []string
+	var textOutput strings.Builder
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if delta != "" {
+			deltas = append(deltas, delta)
+			textOutput.WriteString(delta)
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+
+	for _, d := range deltas {
+		if strings.Contains(d, "prim") {
+			t.Fatalf("delta leaked 'prim' attribute fragment: %q", d)
+		}
+	}
+
+	got := textOutput.String()
+	want := `{"name":"exec_command"}`
+	if got != want {
+		t.Fatalf("expected clean JSON output %q, got %q", want, got)
+	}
+}
+
+func TestParseNDJSONStream_IncorporatePatchSyncAdvance(t *testing.T) {
+	// Recreates the exact bug where Notion streams `limit: `, then sends `limit: 500` via patch-sync snapshot,
+	// then appends `}}` via op="x". The `500` MUST NOT be dropped!
+	stream := strings.Join([]string{
+		`{"type":"patch","v":[{"o":"a","p":"/s/1/value/-","v":{"type":"text","content":"{\"name\": \"Read\", \"arguments\": {\"limit\": "}}]}`,
+		`{"type":"patch-sync","version":1,"data":{"s":[{"id":"s0","type":"agent-instruction-state"},{"id":"s1","type":"agent-inference","value":[{"type":"text","content":"{\"name\": \"Read\", \"arguments\": {\"limit\": 500"}]}]}}`,
+		`{"type":"patch","v":[{"o":"x","p":"/s/1/value/0/content","v":"}}"}]}`,
+	}, "\n")
+
+	var textOutput strings.Builder
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if delta != "" {
+			textOutput.WriteString(delta)
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream() error = %v", err)
+	}
+
+	got := textOutput.String()
+	want := `{"name": "Read", "arguments": {"limit": 500}}`
+	if got != want {
+		t.Fatalf("expected preserved snapshot advance, got %q, want %q", got, want)
+	}
+}
+
+
+
