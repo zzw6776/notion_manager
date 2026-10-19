@@ -486,23 +486,28 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 	return filename, nil
 }
 
-// AddAccount adds an account to the pool (hot-load, no restart needed).
+// AddAccount adds an account to the pool (hot-load, no restart needed) and registers its models.
 func (p *AccountPool) AddAccount(acc *Account) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	// Check for duplicate by account_id (same user_id + space_id)
 	acc.EnsureAccountID()
+	replaced := false
 	for i, existing := range p.accounts {
 		existing.EnsureAccountID()
 		if existing.AccountID != "" && existing.AccountID == acc.AccountID {
 			// Replace existing (same workspace)
 			p.accounts[i] = acc
 			log.Printf("[account] replaced: %s (%s) aid=%s", acc.UserName, acc.UserEmail, acc.ShortSpaceID())
-			return
+			replaced = true
+			break
 		}
 	}
-	p.accounts = append(p.accounts, acc)
-	log.Printf("[account] added: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
+	if !replaced {
+		p.accounts = append(p.accounts, acc)
+		log.Printf("[account] added: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
+	}
+	p.mu.Unlock()
+	p.RegisterAccountModels(acc)
 }
 
 // DeleteAccountFile removes the JSON file for an account from the accounts directory.
@@ -641,7 +646,7 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			return
 		}
 
-		// Hot-load into pool
+		// Hot-load into pool (AddAccount immediately registers all models in acc)
 		pool.AddAccount(acc)
 
 		log.Printf("[add-account] success: %s (%s) → %s", acc.UserName, acc.UserEmail, filename)

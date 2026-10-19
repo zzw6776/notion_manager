@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -45,6 +46,9 @@ var (
 )
 
 var DefaultModelMap = map[string]string{
+	"opus-5.5":         "albuquerque-quinn",
+	"sonnet-5.5":       "achira-donut",
+	"haiku-5.5":        "amla-jam",
 	"opus-4.6":         "avocado-froyo-medium",
 	"sonnet-4.6":       "almond-croissant-low",
 	"haiku-4.5":        "anthropic-haiku-4.5",
@@ -53,6 +57,7 @@ var DefaultModelMap = map[string]string{
 	"gemini-2.5-flash": "vertex-gemini-2.5-flash",
 	"gemini-3-flash":   "gingerbread",
 	"minimax-m2.5":     "fireworks-minimax-m2.5",
+	"kimi-k3":          "fireworks-kimi-k3",
 }
 
 var modelMapMu sync.RWMutex
@@ -104,8 +109,12 @@ func ApplyConfig(cfg *Config) {
 
 // anthropicModelAliases maps Anthropic SDK model names to our friendly aliases
 var anthropicModelAliases = map[string]string{
+	"claude-opus-5-5":   "opus-5.5",
+	"claude-opus-5":     "opus-5.5",
+	"claude-sonnet-5-5": "sonnet-5.5",
+	"claude-sonnet-5":   "sonnet-5.5",
+	"claude-haiku-5-5":  "haiku-5.5",
 	"claude-opus-4-6":   "opus-4.6",
-	"claude-opus-4-5":   "opus-4.6", // older version → best available opus
 	"claude-sonnet-4-6": "sonnet-4.6",
 	"claude-haiku-4-5":  "haiku-4.5",
 	"claude-sonnet-4-5": "sonnet-4.5",
@@ -114,84 +123,77 @@ var anthropicModelAliases = map[string]string{
 	"claude-haiku-3-5":  "haiku-3.5",
 }
 
-// ResolveModel maps OpenAI/Anthropic model name → Notion internal model name
-func ResolveModel(model string) string {
+// ResolveModel maps OpenAI/Anthropic model name → Notion internal model name.
+// If the model cannot be resolved to a known Notion model ID, it returns an error.
+func ResolveModel(model string) (string, error) {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return "", errors.New("model name cannot be empty")
+	}
+
+	// 1. Researcher models
+	if IsResearcherModel(trimmed) {
+		return trimmed, nil
+	}
+
 	snap := SnapshotModelMap()
-	// Direct match
-	if id, ok := snap[model]; ok {
-		return id
+
+	// 2. Direct match
+	if id, ok := snap[trimmed]; ok {
+		return id, nil
 	}
-	// Normalized match (e.g. "Haiku 5.5" → "haiku-5.5", "GPT-6.1 Sol" → "gpt-6.1-sol")
-	normalized := normalizeModelName(model)
+
+	// 3. Normalized match (e.g. "Haiku 5.5" → "haiku-5.5", "GPT-6.1 Sol" → "gpt-6.1-sol")
+	normalized := normalizeModelName(trimmed)
 	if id, ok := snap[normalized]; ok {
-		return id
+		return id, nil
 	}
-	// Try Anthropic alias (e.g. "claude-opus-4-6" → "opus-4.6")
-	if alias, ok := anthropicModelAliases[model]; ok {
+
+	// 4. Try Anthropic alias (e.g. "claude-opus-5-5" → "opus-5.5")
+	if alias, ok := anthropicModelAliases[trimmed]; ok {
 		if id, ok2 := snap[alias]; ok2 {
-			return id
+			return id, nil
 		}
 	}
 	if alias, ok := anthropicModelAliases[normalized]; ok {
 		if id, ok2 := snap[alias]; ok2 {
-			return id
+			return id, nil
 		}
 	}
-	// Strip date suffix (e.g. "claude-opus-4-6-20250929" → "claude-opus-4-6")
-	if idx := strings.LastIndex(model, "-2"); idx > 0 && len(model)-idx >= 9 {
-		stripped := model[:idx]
+
+	// 5. Strip date suffix (e.g. "claude-opus-4-6-20250929" → "claude-opus-4-6")
+	if idx := strings.LastIndex(trimmed, "-2"); idx > 0 && len(trimmed)-idx >= 9 {
+		stripped := trimmed[:idx]
 		if id, ok := snap[stripped]; ok {
-			return id
+			return id, nil
 		}
 		if alias, ok := anthropicModelAliases[stripped]; ok {
 			if id, ok2 := snap[alias]; ok2 {
-				return id
+				return id, nil
 			}
 		}
 	}
 	if idx := strings.LastIndex(normalized, "-2"); idx > 0 && len(normalized)-idx >= 9 {
 		stripped := normalized[:idx]
 		if id, ok := snap[stripped]; ok {
-			return id
+			return id, nil
 		}
 		if alias, ok := anthropicModelAliases[stripped]; ok {
 			if id, ok2 := snap[alias]; ok2 {
-				return id
+				return id, nil
 			}
 		}
 	}
-	// Fuzzy fallback: map unrecognized models by family keyword
-	lower := strings.ToLower(model)
-	switch {
-	case strings.Contains(lower, "opus"):
-		if id, ok := snap["opus-5.5"]; ok {
-			log.Printf("[model] fuzzy fallback %q → opus-5.5", model)
-			return id
-		}
-		if id, ok := snap["opus-4.6"]; ok {
-			log.Printf("[model] fuzzy fallback %q → opus-4.6", model)
-			return id
-		}
-	case strings.Contains(lower, "sonnet"):
-		if id, ok := snap["sonnet-5.5"]; ok {
-			log.Printf("[model] fuzzy fallback %q → sonnet-5.5", model)
-			return id
-		}
-		if id, ok := snap["sonnet-4.6"]; ok {
-			log.Printf("[model] fuzzy fallback %q → sonnet-4.6", model)
-			return id
-		}
-	case strings.Contains(lower, "haiku"):
-		if id, ok := snap["haiku-5.5"]; ok {
-			log.Printf("[model] fuzzy fallback %q → haiku-5.5", model)
-			return id
-		}
-		if id, ok := snap["haiku-4.5"]; ok {
-			log.Printf("[model] fuzzy fallback %q → haiku-4.5", model)
-			return id
+
+	// 6. Direct match if caller already passed a valid Notion internal model ID
+	for _, id := range snap {
+		if id == trimmed {
+			return trimmed, nil
 		}
 	}
-	return model
+
+	// All fallback logic deleted! If model cannot be matched, return error directly.
+	return "", fmt.Errorf("model %q not found or not supported", model)
 }
 
 // StreamCallback is called for each text delta during streaming
@@ -1360,7 +1362,10 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 		return callResearcherInference(acc, messages, cb, &opt)
 	}
 
-	notionModel := ResolveModel(model)
+	notionModel, err := ResolveModel(model)
+	if err != nil {
+		return err
+	}
 	if notionModel != model {
 		log.Printf("[model] resolved %q → %q", model, notionModel)
 	}
@@ -1859,16 +1864,30 @@ func setNotionHeadersJSON(req *http.Request, acc *Account) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("sec-ch-ua", AppConfig.Browser.SecChUA)
+	secChUA := `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`
+	secChUAPlatform := `"Windows"`
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+	if AppConfig != nil {
+		if AppConfig.Browser.SecChUA != "" {
+			secChUA = AppConfig.Browser.SecChUA
+		}
+		if AppConfig.Browser.SecChUAPlatform != "" {
+			secChUAPlatform = AppConfig.Browser.SecChUAPlatform
+		}
+		if AppConfig.Browser.UserAgent != "" {
+			userAgent = AppConfig.Browser.UserAgent
+		}
+	}
+	req.Header.Set("sec-ch-ua", secChUA)
 	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", AppConfig.Browser.SecChUAPlatform)
+	req.Header.Set("sec-ch-ua-platform", secChUAPlatform)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("x-notion-active-user-header", acc.UserID)
 	req.Header.Set("x-notion-space-id", acc.SpaceID)
 	req.Header.Set("notion-client-version", acc.ClientVersion)
-	req.Header.Set("User-Agent", AppConfig.Browser.UserAgent)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://www.notion.so")
 
 	if acc.FullCookie != "" {
@@ -2019,73 +2038,126 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 			}
 		}
 
-		if monthlyResetAtMs == 0 {
-			if v2.PremiumCredits.ServicePeriodStartMs > 0 {
-				serviceStart := time.UnixMilli(v2.PremiumCredits.ServicePeriodStartMs)
-				monthlyResetAtMs = serviceStart.AddDate(0, 1, 0).UnixMilli()
-			} else {
-				monthlyResetAtMs = time.Now().AddDate(0, 1, 0).UnixMilli()
-			}
-		}
-
 		calls := v1.SpaceUsage
 		if calls <= 0 {
 			calls = v2.Usage.CurrentServicePeriod.SpaceUsage
 		}
-		info.MonthlyUsage = calls
-		info.MonthlyLimit = 25000
-		info.MonthlyResetAtMs = monthlyResetAtMs
 
-		// In Notion AI Business/Team plans, fair use monthly baseline is 25,000 queries.
-		// At 330 calls: 1%
-		// At 488 calls: 2%
-		monthlyPct := 0
-		if calls > 0 {
-			monthlyPct = (calls*100 + 12500) / 25000
-			if monthlyPct == 0 {
-				monthlyPct = 1
-			} else if monthlyPct > 100 {
-				monthlyPct = 100
-			}
-		}
-		info.MonthlyUsagePercent = monthlyPct
-
-		// Rolling 6-hour window quota calculation:
-		// A rolling 6h window resets 6h after the first request in the active window.
+		// Rolling 6-hour window quota calculation
 		rollingWindowMs := int64(6 * 3600 * 1000)
 		nowMs := time.Now().UnixMilli()
 
-		var rollingResetAtMs int64
-		if acc.QuotaInfo != nil && acc.QuotaInfo.RollingResetAtMs > nowMs {
-			rollingResetAtMs = acc.QuotaInfo.RollingResetAtMs
-		} else if v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
-			targetReset := int64(1792347360000)
-			if nowMs < targetReset {
-				rollingResetAtMs = targetReset
-			} else {
-				rollingResetAtMs = nowMs + (rollingWindowMs - ((nowMs - v1.LastSpaceUsageAtMs) % rollingWindowMs))
-			}
-		} else {
-			rollingResetAtMs = nowMs + rollingWindowMs
-		}
-		info.RollingResetAtMs = rollingResetAtMs
+		// Fetch official rate limit status from Notion (returns exact 6h rolling and monthly billing period usage)
+		rateLimitFetched := false
+		reqRateLimit, err := http.NewRequest("POST", NotionAPIBase+"/getCreditRateLimitStatus", bytes.NewReader(body))
+		if err == nil {
+			setNotionHeadersJSON(reqRateLimit, acc)
+			if respRateLimit, err := client.Do(reqRateLimit); err == nil {
+				defer respRateLimit.Body.Close()
+				if respRateLimit.StatusCode == 200 {
+					var rls creditRateLimitStatusResponse
+					if err := json.NewDecoder(respRateLimit.Body).Decode(&rls); err == nil {
+						rateLimitFetched = true
 
-		// Rolling percentage:
-		// In Notion AI Business plan, Fair Use 6h threshold is 3,000 requests.
-		// At 330 calls: 11%
-		// At 488 calls: 16%
-		rollingPct := 0
-		rollingCalls := 0
-		if calls > 0 && v1.LastSpaceUsageAtMs > 0 && nowMs-v1.LastSpaceUsageAtMs < rollingWindowMs {
-			rollingCalls = calls
-			rollingPct = (calls * 100) / 3000
-			if rollingPct > 100 {
-				rollingPct = 100
+						if rls.Status != "" && !strings.EqualFold(rls.Status, "within_limit") {
+							info.IsEligible = false
+						}
+
+						// 1. Rolling 6h window usage
+						rollingUsedPct := rls.Window.Used
+						rollingResetsInSec := rls.ResetsInSeconds
+						if rollingUsedPct == 0 && rollingResetsInSec == 0 {
+							for _, al := range rls.Allowances {
+								if strings.EqualFold(al.Cadence, "rolling") {
+									rollingUsedPct = al.Used
+									rollingResetsInSec = al.ResetsInSeconds
+									break
+								}
+							}
+						}
+
+						rPct := int(math.Round(rollingUsedPct))
+						if rPct == 0 && rollingUsedPct > 0 {
+							rPct = 1
+						}
+						if rPct > 100 {
+							rPct = 100
+						}
+						info.RollingUsagePercent = rPct
+						info.RollingLimit = 3000
+						info.RollingUsage = int(math.Round(rollingUsedPct * float64(info.RollingLimit) / 100.0))
+						if rollingResetsInSec > 0 {
+							info.RollingResetAtMs = nowMs + rollingResetsInSec*1000
+						} else {
+							info.RollingResetAtMs = nowMs + rollingWindowMs
+						}
+
+						// 2. Monthly billing period usage
+						monthlyUsedPct := rls.BillingPeriodWindow.Used
+						monthlyEndMs := rls.BillingPeriodWindow.PeriodEndMs
+						if monthlyUsedPct == 0 && monthlyEndMs == 0 {
+							for _, al := range rls.Allowances {
+								if strings.EqualFold(al.Cadence, "billing_period") {
+									monthlyUsedPct = al.Used
+									monthlyEndMs = al.PeriodEndMs
+									break
+								}
+							}
+						}
+
+						mPct := int(math.Round(monthlyUsedPct))
+						if mPct == 0 && monthlyUsedPct > 0 {
+							mPct = 1
+						}
+						if mPct > 100 {
+							mPct = 100
+						}
+						info.MonthlyUsagePercent = mPct
+						if monthlyEndMs > 0 {
+							monthlyResetAtMs = monthlyEndMs
+						}
+					}
+				}
 			}
 		}
-		info.RollingUsage = rollingCalls
-		info.RollingLimit = 3000
-		info.RollingUsagePercent = rollingPct
+
+		if !rateLimitFetched {
+			if monthlyResetAtMs == 0 {
+				if v2.PremiumCredits.ServicePeriodStartMs > 0 {
+					serviceStart := time.UnixMilli(v2.PremiumCredits.ServicePeriodStartMs)
+					monthlyResetAtMs = serviceStart.AddDate(0, 1, 0).UnixMilli()
+				} else {
+					monthlyResetAtMs = time.Now().AddDate(0, 1, 0).UnixMilli()
+				}
+			}
+
+			// In Notion AI Business/Team plans, fair use monthly baseline is 25,000 queries.
+			monthlyPct := 0
+			if calls > 0 {
+				monthlyPct = (calls*100 + 12500) / 25000
+				if monthlyPct == 0 {
+					monthlyPct = 1
+				} else if monthlyPct > 100 {
+					monthlyPct = 100
+				}
+			}
+			info.MonthlyUsagePercent = monthlyPct
+
+			var rollingResetAtMs int64
+			if acc.QuotaInfo != nil && acc.QuotaInfo.RollingResetAtMs > nowMs {
+				rollingResetAtMs = acc.QuotaInfo.RollingResetAtMs
+			} else {
+				rollingResetAtMs = nowMs + rollingWindowMs
+			}
+			info.RollingResetAtMs = rollingResetAtMs
+			info.RollingLimit = 3000
+			info.RollingUsage = 0
+			info.RollingUsagePercent = 0
+		}
+
+		info.MonthlyUsage = calls
+		info.MonthlyLimit = 25000
+		info.MonthlyResetAtMs = monthlyResetAtMs
 	}
 
 	return info, nil

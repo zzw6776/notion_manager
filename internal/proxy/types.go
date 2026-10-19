@@ -87,6 +87,39 @@ type quotaV1Response struct {
 	LastSpaceUsageAtMs int64  `json:"lastSpaceUsageAtMs"`
 }
 
+// creditRateLimitStatusResponse is the raw response from getCreditRateLimitStatus
+type creditRateLimitStatusResponse struct {
+	Status string `json:"status"`
+	Window struct {
+		CreditType string  `json:"creditType"`
+		Scope      string  `json:"scope"`
+		Window     string  `json:"window"`
+		Used       float64 `json:"used"`
+		Limit      float64 `json:"limit"`
+	} `json:"window"`
+	ResetsInSeconds     int64 `json:"resetsInSeconds"`
+	BillingPeriodWindow struct {
+		CreditType  string  `json:"creditType"`
+		Scope       string  `json:"scope"`
+		Cadence     string  `json:"cadence"`
+		Used        float64 `json:"used"`
+		Limit       float64 `json:"limit"`
+		PeriodEndMs int64   `json:"periodEndMs"`
+	} `json:"billingPeriodWindow"`
+	Allowances []struct {
+		BucketID        string  `json:"bucketId"`
+		Cadence         string  `json:"cadence"`
+		State           string  `json:"state"`
+		Window          string  `json:"window"`
+		Used            float64 `json:"used"`
+		Limit           float64 `json:"limit"`
+		ResetsInSeconds int64   `json:"resetsInSeconds"`
+		PeriodStartMs   int64   `json:"periodStartMs"`
+		PeriodEndMs     int64   `json:"periodEndMs"`
+		Enforcement     string  `json:"enforcement"`
+	} `json:"allowances"`
+}
+
 // quotaV2Response is the raw response from getAIUsageEligibilityV2 (premium credits)
 type quotaV2Response struct {
 	Usage struct {

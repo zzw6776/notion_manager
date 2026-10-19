@@ -805,7 +805,12 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			log.Printf("[ask-mode] %q -> %q (per-request override)", model, stripped)
 		}
 		model = stripped
-		resolvedModel := ResolveModel(model)
+		resolvedModel, err := ResolveModel(model)
+		if err != nil {
+			log.Printf("[model] resolution failed for %q: %v", model, err)
+			writeAnthropicError(w, requestID, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
 		useReadOnlyMode := askFromModel || AppConfig.AskModeDefault()
 
 		// ── Detailed request logging ──

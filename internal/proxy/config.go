@@ -154,6 +154,9 @@ func DefaultConfig() *Config {
 			DefaultConcurrency: 1,
 		},
 		ModelMap: map[string]string{
+			"opus-5.5":         "albuquerque-quinn",
+			"sonnet-5.5":       "achira-donut",
+			"haiku-5.5":        "amla-jam",
 			"opus-4.6":         "avocado-froyo-medium",
 			"sonnet-4.6":       "almond-croissant-low",
 			"haiku-4.5":        "anthropic-haiku-4.5",
@@ -162,6 +165,7 @@ func DefaultConfig() *Config {
 			"gemini-2.5-flash": "vertex-gemini-2.5-flash",
 			"gemini-3-flash":   "gingerbread",
 			"minimax-m2.5":     "fireworks-minimax-m2.5",
+			"kimi-k3":          "fireworks-kimi-k3",
 		},
 	}
 }
@@ -532,21 +536,30 @@ func EnsureApiKey(cfg *Config, configPath string) {
 // Helper methods for convenient access to typed timeout values
 
 func (c *Config) InferenceTimeoutDuration() time.Duration {
+	if c == nil || c.Timeouts.InferenceTimeout <= 0 {
+		return 300 * time.Second
+	}
 	return time.Duration(c.Timeouts.InferenceTimeout) * time.Second
 }
 
 func (c *Config) ResearchTimeoutDuration() time.Duration {
-	if c.Timeouts.ResearchTimeout <= 0 {
+	if c == nil || c.Timeouts.ResearchTimeout <= 0 {
 		return 360 * time.Second
 	}
 	return time.Duration(c.Timeouts.ResearchTimeout) * time.Second
 }
 
 func (c *Config) APITimeoutDuration() time.Duration {
+	if c == nil || c.Timeouts.APITimeout <= 0 {
+		return 30 * time.Second
+	}
 	return time.Duration(c.Timeouts.APITimeout) * time.Second
 }
 
 func (c *Config) TLSDialTimeoutDuration() time.Duration {
+	if c == nil || c.Timeouts.TLSDialTimeout <= 0 {
+		return 10 * time.Second
+	}
 	return time.Duration(c.Timeouts.TLSDialTimeout) * time.Second
 }
 

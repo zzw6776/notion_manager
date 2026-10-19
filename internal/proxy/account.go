@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	mrand "math/rand"
 	"os"
 	"path/filepath"
@@ -305,6 +306,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 	if len(p.accounts) == 0 {
 		return fmt.Errorf("no valid accounts found in %s", dir)
 	}
+	p.RegisterAllAccountModels()
 	log.Printf("[account] total: %d accounts loaded", len(p.accounts))
 	return nil
 }
@@ -370,6 +372,34 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 	}
 	if added > 0 {
 		log.Printf("[account] reload: %d new account(s); pool now has %d", added, len(p.accounts))
+		p.RegisterAllAccountModels()
+	}
+}
+
+// RegisterAccountModels registers the models available in the account into DefaultModelMap.
+func (p *AccountPool) RegisterAccountModels(acc *Account) {
+	if acc == nil {
+		return
+	}
+	for _, m := range acc.modelsSnapshot() {
+		normalizedName := normalizeModelName(m.Name)
+		if normalizedName != "" && m.ID != "" {
+			SetModelID(normalizedName, m.ID)
+		}
+	}
+}
+
+// RegisterAllAccountModels registers models from all accounts in the pool into DefaultModelMap.
+func (p *AccountPool) RegisterAllAccountModels() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, acc := range p.accounts {
+		for _, m := range acc.modelsSnapshot() {
+			normalizedName := normalizeModelName(m.Name)
+			if normalizedName != "" && m.ID != "" {
+				SetModelID(normalizedName, m.ID)
+			}
+		}
 	}
 }
 
@@ -1640,7 +1670,7 @@ func loadPersistedQuotaInfo(data []byte) *QuotaInfo {
 			info.MonthlyLimit = 25000
 		}
 		if info.RollingUsage == 0 && info.RollingUsagePercent > 0 {
-			info.RollingUsage = info.SpaceUsage
+			info.RollingUsage = int(math.Round(float64(info.RollingUsagePercent) * float64(info.RollingLimit) / 100.0))
 		}
 	}
 	return info

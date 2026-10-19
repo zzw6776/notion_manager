@@ -281,6 +281,8 @@ func main() {
 
 	if pool.Count() == 0 {
 		log.Printf("[warn] No accounts found. Place account JSON files in %s/ to enable API and proxy.", accountsDir)
+	} else {
+		pool.RegisterAllAccountModels()
 	}
 
 	// Startup refresh: kick off a quota+models check in the background so

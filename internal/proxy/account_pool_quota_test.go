@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -383,5 +385,98 @@ func TestSelectorsSkipAccountAfterApplyQuotaInfo(t *testing.T) {
 	}
 	if got := pool.AvailableCount(); got != 1 {
 		t.Fatalf("expected AvailableCount=1, got %d", got)
+	}
+}
+
+func TestLoadPersistedQuotaInfoCalculatesRollingUsageFromPercent(t *testing.T) {
+	data := []byte(`{
+		"quota_info": {
+			"has_unlimited_allowance": true,
+			"space_usage": 2062,
+			"rolling_usage_percent": 4,
+			"rolling_limit": 3000,
+			"rolling_usage": 0
+		}
+	}`)
+	info := loadPersistedQuotaInfo(data)
+	if info == nil {
+		t.Fatal("expected non-nil info")
+	}
+	if info.RollingUsage != 120 {
+		t.Fatalf("expected RollingUsage=120, got %d", info.RollingUsage)
+	}
+	if rem := basicRemaining(info); rem != 96 {
+		t.Fatalf("expected basicRemaining=96, got %d", rem)
+	}
+}
+
+func TestCreditRateLimitStatusResponseParsing(t *testing.T) {
+	rawJSON := `{
+		"status": "within_limit",
+		"window": {
+			"creditType": "basic_ai_credits",
+			"scope": "per_user",
+			"window": "6h",
+			"used": 4.45,
+			"limit": 100
+		},
+		"resetsInSeconds": 18943,
+		"billingPeriodWindow": {
+			"creditType": "basic_ai_credits",
+			"scope": "per_user",
+			"cadence": "billing_period",
+			"used": 8.49,
+			"limit": 100,
+			"periodEndMs": 1795006800000
+		},
+		"allowances": [
+			{
+				"bucketId": "standard",
+				"cadence": "billing_period",
+				"state": "resolved",
+				"used": 8.49,
+				"limit": 100,
+				"periodStartMs": 1792328400000,
+				"periodEndMs": 1795006800000,
+				"enforcement": "enforced"
+			},
+			{
+				"bucketId": "standard",
+				"cadence": "rolling",
+				"state": "resolved",
+				"window": "6h",
+				"used": 4.45,
+				"limit": 100,
+				"resetsInSeconds": 18943,
+				"enforcement": "enforced"
+			}
+		]
+	}`
+
+	var rls creditRateLimitStatusResponse
+	if err := json.Unmarshal([]byte(rawJSON), &rls); err != nil {
+		t.Fatalf("failed to unmarshal creditRateLimitStatusResponse: %v", err)
+	}
+
+	rollingUsedPct := rls.Window.Used
+	if rollingUsedPct != 4.45 {
+		t.Fatalf("expected Window.Used=4.45, got %v", rollingUsedPct)
+	}
+	rPct := int(math.Round(rollingUsedPct))
+	if rPct != 4 {
+		t.Fatalf("expected rPct=4, got %d", rPct)
+	}
+
+	mUsedPct := rls.BillingPeriodWindow.Used
+	if mUsedPct != 8.49 {
+		t.Fatalf("expected BillingPeriodWindow.Used=8.49, got %v", mUsedPct)
+	}
+	mPct := int(math.Round(mUsedPct))
+	if mPct != 8 {
+		t.Fatalf("expected mPct=8, got %d", mPct)
+	}
+
+	if rls.BillingPeriodWindow.PeriodEndMs != 1795006800000 {
+		t.Fatalf("expected PeriodEndMs=1795006800000, got %d", rls.BillingPeriodWindow.PeriodEndMs)
 	}
 }
